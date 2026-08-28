@@ -1,0 +1,203 @@
+:root {
+  --bg: #14161a;
+  --panel: #1b1e23;
+  --panel-2: #22262d;
+  --border: #2b3038;
+  --text: #e6e9ee;
+  --dim: #8b929c;
+  --accent: #f5c542;
+  --accent-2: #59c2ff;
+  --danger: #ff6b6b;
+  --warn: #f0b429;
+  --ok: #4cc76a;
+  --radius: 7px;
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* A canvas is a replaced element: `inset: 0` alone leaves it at its intrinsic
+   300x150, so the size has to be stated explicitly. */
+#viewport {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.panel {
+  position: absolute;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(6px);
+}
+
+.panel h2 {
+  margin: 0;
+  padding: 8px 10px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.panel .body { padding: 0 10px 10px; }
+
+#toolbar { top: 12px; left: 12px; width: 188px; }
+#palette { top: 12px; left: 212px; width: 282px; max-height: calc(100% - 24px); overflow: auto; }
+#builder { top: 12px; left: 212px; width: 282px; max-height: calc(100% - 24px); overflow: auto; display: none; }
+#underlay { top: 12px; right: 12px; width: 268px; }
+#signals { top: 12px; left: 212px; width: 276px; max-height: calc(100% - 216px); overflow: auto; }
+#inspector { top: 296px; right: 12px; width: 268px; max-height: calc(100% - 440px); overflow: auto; }
+#controls { left: 12px; bottom: 12px; width: 430px; }
+#hud {
+  right: 12px; bottom: 12px; width: 268px;
+  font-variant-numeric: tabular-nums;
+}
+/* Tool hints are two sentences long. Ellipsing them threw away the half that said
+   what the modifier keys do, which is the half worth reading. */
+#status {
+  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+  padding: 6px 14px; border-radius: 14px;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  border: 1px solid var(--border);
+  color: var(--dim); pointer-events: none;
+  transition: opacity 180ms ease;
+  max-width: min(52vw, 720px); text-align: center; line-height: 1.35;
+}
+
+button, select, input[type="text"], input[type="number"] {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 8px;
+}
+button { cursor: pointer; transition: background 120ms ease, border-color 120ms ease; }
+button:hover { background: #2a2f37; }
+button:disabled { opacity: 0.4; cursor: default; }
+button.active { background: var(--accent); border-color: var(--accent); color: #1a1a1a; font-weight: 600; }
+button.ghost { background: transparent; }
+
+.row { display: flex; gap: 6px; align-items: center; }
+.row + .row { margin-top: 6px; }
+.grow { flex: 1; min-width: 0; }
+.tools { display: grid; grid-template-columns: 1fr; gap: 4px; }
+.tools button { text-align: left; display: flex; justify-content: space-between; gap: 8px; }
+.tools kbd {
+  color: var(--dim); font: inherit; font-size: 11px;
+  border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; background: #171a1f;
+}
+button.active kbd { color: #1a1a1a; border-color: rgba(0,0,0,0.25); background: transparent; }
+
+.profile-list { display: grid; gap: 3px; }
+.profile {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 7px; border-radius: 5px; cursor: pointer;
+  border: 1px solid transparent;
+}
+.profile:hover { background: var(--panel-2); }
+.profile.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.profile canvas.preview { border-radius: 3px; flex: none; display: block; }
+
+/* Road editor: the drawing first, the numbers as a readout beside it. */
+.preview-frame {
+  display: flex; justify-content: center;
+  padding: 6px; margin: 6px 0;
+  border-radius: 6px; background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+.preview-frame canvas { border-radius: 4px; cursor: pointer; display: block; }
+.steppers { display: grid; gap: 3px; margin: 6px 0; }
+.stepper {
+  display: grid; grid-template-columns: 1fr 30px 66px 30px;
+  align-items: center; gap: 5px;
+}
+.stepper .label { color: var(--dim); font-size: 11px; }
+.stepper .value { text-align: center; font-variant-numeric: tabular-nums; font-size: 12px; }
+.stepper .step {
+  padding: 4px 0; min-width: 0; font-size: 14px; line-height: 1.1;
+}
+.profile .meta { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+label.field { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+label.field span { color: var(--dim); flex: 0 0 auto; }
+/* Fill whatever is left rather than a fixed width a long name runs out of. */
+label.field input, label.field select { flex: 1 1 auto; width: auto; min-width: 0; }
+label.check { display: flex; align-items: center; gap: 8px; }
+
+.diag { display: grid; gap: 4px; }
+.diag .item {
+  display: grid; grid-template-columns: 8px 1fr; gap: 8px; align-items: start;
+  padding: 5px 6px; border-radius: 5px; background: var(--panel-2); cursor: pointer;
+}
+.diag .item:hover { background: #2a2f37; }
+.diag .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; }
+.diag .error { background: var(--danger); }
+.diag .warning { background: var(--warn); }
+.diag .info { background: var(--accent-2); }
+.diag .msg { font-size: 12px; }
+.empty { color: var(--dim); font-size: 12px; padding: 2px 0 4px; }
+
+table.stats { width: 100%; border-collapse: collapse; }
+table.stats td { padding: 1px 0; }
+table.stats td:last-child { text-align: right; color: var(--accent-2); }
+table.stats td:first-child { color: var(--dim); }
+
+/* A range input is a flex item here, and `width: 100%` resolves against the *row*,
+   so it demanded the whole width and its label ended up underneath it. */
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+.row input[type="range"] { flex: 1 1 auto; width: auto; min-width: 0; }
+.row > .field-label { flex: 0 0 62px; color: var(--dim); font-size: 12px; }
+hr { border: none; border-top: 1px solid var(--border); margin: 9px 0; }
+.hint { color: var(--dim); font-size: 11px; margin-top: 6px; }
+
+/* --- Traffic signals ---------------------------------------------------- */
+
+#signals .seg button { padding: 4px 6px; font-size: 12px; }
+#signals .summary { margin: 8px 0 6px; color: var(--dim); font-size: 11px; }
+#signals .summary .value { margin-left: auto; color: var(--accent-2); font-variant-numeric: tabular-nums; }
+#signals .presets button.small { padding: 4px 4px; font-size: 11px; }
+#signals button.small { padding: 4px 8px; font-size: 11px; min-width: 26px; }
+
+.phase {
+  margin: 8px 0;
+  padding: 6px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+/* The phase that is running right now, so the panel and the map agree. */
+.phase.running { border-color: var(--accent-2); }
+.phase-head { margin-bottom: 5px; }
+.phase-head .name { font-size: 12px; font-weight: 600; }
+.phase-head .clock {
+  margin-left: auto; color: var(--accent-2);
+  font-variant-numeric: tabular-nums; font-size: 11px; min-width: 30px; text-align: right;
+}
+.phase canvas.diagram { display: block; border-radius: 4px; width: 100%; height: auto; }
+.phase .timing { display: grid; gap: 3px; margin-top: 6px; }
+.phase .movements { color: var(--dim); font-size: 11px; margin: 6px 0 0; line-height: 1.35; }
+#signals .warn {
+  color: var(--warn); font-size: 11px; margin: 6px 0 0; line-height: 1.35;
+}
+#signals .turn-on-red { margin: 4px 0 6px; font-size: 12px; color: var(--dim); }
+#signals .offset { margin: 2px 0 4px; }
+#signals .offset .stepper { grid-template-columns: 1fr 26px 52px 26px; }

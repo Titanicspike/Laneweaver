@@ -1,0 +1,43 @@
+{
+  "name": "laneweaver",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Free-form micro-traffic simulator with first-class highway merges",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "bench": "vitest run --config vitest.bench.config.ts",
+    "audit": "tsx scratch/audit.ts"
+  },
+  "dependencies": {
+    "bezier-js": "^6.1.4",
+    "d3-contour": "^4.0.2",
+    "polygon-clipping": "^0.15.7",
+    "rbush": "^4.0.1",
+    "simplex-noise": "^4.0.3"
+  },
+  "devDependencies": {
+    "@types/d3-contour": "^3.0.6",
+    "@types/node": "^22.10.2",
+    "@types/rbush": "^4.0.0",
+    "jsdom": "^29.1.1",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
+  },
+  "license": "MIT",
+  "keywords": [
+    "traffic",
+    "simulation",
+    "idm",
+    "mobil",
+    "canvas",
+    "typescript"
+  ]
+}

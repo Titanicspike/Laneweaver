@@ -1,0 +1,12 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Laneweaver gallery</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0d0f12; color:#c9cdd4; font:12px/1.4 ui-sans-serif,system-ui,sans-serif; }
+  #grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(460px,1fr)); gap:10px; padding:10px; }
+  figure { margin:0; background:#14161a; border:1px solid #2b3038; border-radius:6px; overflow:hidden; }
+  figcaption { padding:4px 8px; font-weight:600; color:#e7eaee; display:flex; justify-content:space-between; }
+  figcaption .note { font-weight:400; color:#8b929c; }
+  canvas { display:block; width:100%; height:var(--h,300px); }
+</style></head>
+<body><div id="grid"></div><script type="module" src="/scratch/gallery.ts"></script></body></html>
