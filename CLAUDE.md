@@ -201,12 +201,34 @@ wrong network in an import: the compiler can only see geometry, so it wired ever
 into the street beneath it — **752 junctions OSM does not have** across twenty imported squares, 229
 of them with a motorway or trunk road as an arm. A freeway with traffic lights on it, drivers
 leaving it in the middle of a span, and on the worst square almost no traffic completing its trip.
-`core/osm/flyovers.ts` finds those crossings and raises the bigger road over a span either side,
-ramping back down — which is what the compiler already understands, because grade lives on control
-points. The spans are fitted to the road available: ways between junctions are often eighty metres
-and a fixed span needs seventy-four, so a fixed one refused most of the bridges that most needed
-building. A span is still refused where it would reach a way's end, because the ends are where the
-junctions are.
+`core/osm/flyovers.ts` finds those crossings and puts the roads on different levels — which is what
+the compiler already understands, because grade lives on control points. The spans are fitted to the
+road available: ways between junctions are often eighty metres and a fixed span needs seventy-four,
+so a fixed one refused most of the bridges that most needed building. A span is still refused where
+it would reach a way's end, because the ends are where the junctions are.
+
+**Which road goes over is a colouring, not a pairwise choice.** At an interchange four ramps crossing
+in the same hundred metres have six crossings between them, and "the bigger road goes over" applied
+to each in turn puts three of them on level 1 — where they cross each other again and the compiler
+joins them straight back up. `assignLevels` colours the whole crossing graph at once, greedily in
+ascending order of road class, so the street keeps the ground, the arterial over it goes to 1 and
+the motorway over both to 2. Four levels is the cap: a road that would need more is left where it
+is, because one wrong junction beats a road hanging in the sky.
+
+**A road changes level over a fixed thirty metres, and that is load-bearing twice over.** The level
+used to be written onto whatever control points the fit had already produced, so the ramp was however
+far apart its last two points happened to be — on a way whose final span was two hundred metres, a
+hundred metres of bridge rounded to ground level, and the compiler joined it to whatever passed
+underneath. Forcing a control point at the ramp distance cut the invented junctions involving a road
+over 85 km/h from 49 to 5. It is also what the transition *looks* like, and an arbitrary one looks
+arbitrary.
+
+**A tunnel comes up to meet the road, as a bridge comes down.** The end level was `Math.min` of the
+way's own level and the node's, which ramps a bridge down to the street it lands on and leaves a
+tunnel at the bottom of its shaft: `min(-2, 0)` is -2, so the mouth never rose and the compiler —
+for which roads at different levels do not meet — left the whole tunnel connected to nothing at
+either end. Moscow has 543 tunnel strokes and London 140; fixing it removed 1,325 dangling portals
+from Moscow alone and took its mean speed from 16 km/h to 24.
 
 A way that *ends* near another it shares no node with is left alone: that is a T, no amount of
 raising makes it anything else, and a mapper forgetting a node on a service road is commoner than an
@@ -1857,9 +1879,16 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   the compiler put them wrong.
 
   Twenty cached squares, five simulated minutes each — a hundred simulated minutes of somebody
-  else's road network — currently give **19,687 completed trips, 18 collisions, nothing lost** and
-  43 errors, all of them either a sliver junction the compiler is right to refuse or a ramp with no
-  room for an auxiliary lane. Compile runs from 285 ms on a small square to 3.1 s on four miles of
+  else's road network — currently give **2,583 completed trips, 6 collisions, nothing lost** and 35
+  errors, all of them either a sliver junction the compiler is right to refuse or a ramp with no
+  room for an auxiliary lane.
+
+  **Count the trips, not the arrivals.** An earlier version of the flyover pass reported 19,687
+  arrivals against today's 2,583, and it was measuring its own damage: raising roads that were
+  already separated left their ends in mid-air, which cut the network into fragments, and every
+  fragment end is a portal. The mean *trip* was 15.6 seconds — cars appearing and vanishing a few
+  metres later. It is 144 s now. Any metric that rewards disconnecting the network needs a
+  companion that does not, and mean trip time is the one. Compile runs from 285 ms on a small square to 3.1 s on four miles of
   Cupertino, and the tick scales with the traffic rather than the map (`scratch/simscale.ts`).
   Numbers, not adjectives: when one of them moves the wrong way, that is the regression.
 

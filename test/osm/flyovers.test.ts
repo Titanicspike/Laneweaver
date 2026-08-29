@@ -1,5 +1,5 @@
 /**
- * Crossings OpenStreetMap says are not crossings.
+ * Crossings OpenStreetMap says are not crossings, and the levels they need.
  *
  * A hand-drawn document has only geometry, so the compiler has only geometry to go
  * on: two roads whose centrelines cross, cross. A survey has topology as well, and
@@ -8,24 +8,29 @@
  * (`bridge=yes`, `layer=1`) `layerOf` already reads it; plenty carry none, and then
  * the compiler wires a motorway into the street beneath it.
  *
- * Measured across twenty imported squares before this: **752 junctions** that OSM
- * does not have, 229 of them with a motorway or trunk road as an arm. What it costs
- * is a freeway with traffic lights on it, drivers leaving it in the middle of a
- * span, and — on the worst square — nearly all of the collisions and almost none of
- * the traffic completing its trip (135 arrivals in five minutes, against 6,184
- * once the bridges were built).
+ * Which of the two goes over is **not** a pairwise question, and answering it as one
+ * is what broke the interchanges. Four ramps crossing in the same hundred metres
+ * have six crossings between them; "the bigger road goes over", applied to each in
+ * turn, puts three of them on level 1 where they cross each other again. It is a
+ * colouring, and `assignLevels` does it as one.
  */
 
 import { describe, expect, it } from 'vitest';
 import { compile } from '@core/network/compiler';
 import { importOsm, type OsmWay } from '@core/osm/import';
-import { bridgeSpans, findFlyovers } from '@core/osm/flyovers';
+import { assignLevels, bridgeSpans, findCrossings } from '@core/osm/flyovers';
 
 let nextId = 1;
 
-/** A way through the given world-metre points, for the flyover finder directly. */
+/** A way through the given world-metre points, for the crossing finder directly. */
 function metreWay(highway: string, nodes: number[], ...xy: number[]) {
-  return { id: nextId++, raw: xy, nodes, tags: { highway } };
+  return { id: nextId++, raw: xy, nodes, tags: { highway }, base: 0 };
+}
+
+/** The level each way ends up on, keyed by way id. */
+function levels(ways: ReturnType<typeof metreWay>[]): Map<number, number> {
+  const offset = assignLevels(ways, findCrossings(ways));
+  return new Map(ways.map((w, i) => [w.id, w.base + offset[i]]));
 }
 
 /** A way from lat/lon pairs, for the importer. */
@@ -39,44 +44,96 @@ describe('finding the crossings that are not junctions', () => {
     // origin. No node in common: in OSM that is a bridge.
     const motorway = metreWay('motorway', [1, 2], -100, 0, 100, 0);
     const street = metreWay('residential', [3, 4], 0, -100, 0, 100);
-    const found = findFlyovers([motorway, street]);
-    // The motorway goes over, and the crossing is half way along it.
-    expect(found.has(motorway.id)).toBe(true);
-    expect(found.has(street.id)).toBe(false);
-    expect(found.get(motorway.id)![0]).toBeCloseTo(100, 1);
+    const found = findCrossings([motorway, street]);
+    expect(found.length).toBe(1);
+    // Half way along each.
+    expect(found[0].sa).toBeCloseTo(100, 1);
+    expect(found[0].sb).toBeCloseTo(100, 1);
   });
 
   it('reports nothing where they share one', () => {
     // The same shape with a node in common is a junction and must stay one.
     const motorway = metreWay('motorway', [1, 7, 2], -100, 0, 0, 0, 100, 0);
     const street = metreWay('residential', [3, 7, 4], 0, -100, 0, 0, 0, 100);
-    expect(findFlyovers([motorway, street]).size).toBe(0);
+    expect(findCrossings([motorway, street]).length).toBe(0);
   });
 
   it('reports nothing for two roads that only meet end to end', () => {
     // Which is what a shared node looks like geometrically, and is the case the
-    // strictly-inside test in `crossAt` exists for.
+    // end-margin test exists for: a way that ends on another meets it.
     const a = metreWay('primary', [1, 2], -100, 0, 0, 0);
     const b = metreWay('primary', [3, 4], 0, 0, 100, 0);
-    expect(findFlyovers([a, b]).size).toBe(0);
+    expect(findCrossings([a, b]).length).toBe(0);
   });
 
+  it('reports nothing where the tags already put them on different levels', () => {
+    const under = metreWay('primary', [1, 2], -100, 0, 100, 0);
+    const over = { ...metreWay('primary', [3, 4], 0, -100, 0, 100), base: 1 };
+    expect(findCrossings([under, over]).length).toBe(0);
+  });
+});
+
+describe('choosing a level for each road', () => {
   it('sends the bigger road over the smaller one', () => {
     const street = metreWay('residential', [1, 2], -100, 0, 100, 0);
     const trunk = metreWay('trunk', [3, 4], 0, -100, 0, 100);
-    const found = findFlyovers([street, trunk]);
-    expect(found.has(trunk.id)).toBe(true);
-    expect(found.has(street.id)).toBe(false);
+    const at = levels([street, trunk]);
+    expect(at.get(street.id)).toBe(0);
+    expect(at.get(trunk.id)).toBe(1);
+  });
+
+  it('stacks an interchange instead of putting it all on one level', () => {
+    // Four roads crossing in the same place, none sharing a node with any other:
+    // six crossings between them. Answered one pair at a time, three of them land
+    // on level 1 and cross each other there — the stack joined back together.
+    const roads = [
+      metreWay('service', [1, 2], -100, 0, 100, 0),
+      metreWay('residential', [3, 4], 0, -100, 0, 100),
+      metreWay('primary', [5, 6], -100, -100, 100, 100),
+      metreWay('motorway', [7, 8], -100, 100, 100, -100),
+    ];
+    const at = levels(roads);
+    const used = roads.map((r) => at.get(r.id) as number);
+    expect(new Set(used).size, 'every road on its own level').toBe(4);
+    // And in the order a real interchange has them.
+    expect(used[0]).toBeLessThan(used[3]);
+    expect(at.get(roads[3].id)).toBe(3);
+  });
+
+  it('reuses a level where two roads never meet each other', () => {
+    // Two parallel side streets crossing one main road: they do not cross each
+    // other, so they share the ground and only the main road climbs. A stack that
+    // counted crossings rather than colouring them would put them on 0 and 1.
+    const a = metreWay('residential', [1, 2], -100, -50, 100, -50);
+    const b = metreWay('residential', [3, 4], -100, 50, 100, 50);
+    const main = metreWay('primary', [5, 6], 0, -100, 0, 100);
+    const at = levels([a, b, main]);
+    expect(at.get(a.id)).toBe(0);
+    expect(at.get(b.id)).toBe(0);
+    expect(at.get(main.id)).toBe(1);
   });
 
   it('decides the same way whichever order it is given them in', () => {
-    // Two roads of the same class and the same length: the answer still has to be
-    // one answer, or two runs of the same import disagree.
     const a = metreWay('residential', [1, 2], -100, 0, 100, 0);
     const b = metreWay('residential', [3, 4], 0, -100, 0, 100);
-    const one = findFlyovers([a, b]);
-    const two = findFlyovers([b, a]);
-    expect([...one.keys()]).toEqual([...two.keys()]);
+    const one = levels([a, b]);
+    const two = levels([b, a]);
+    expect(one.get(a.id)).toBe(two.get(a.id));
+    expect(one.get(b.id)).toBe(two.get(b.id));
+  });
+
+  it('leaves a road alone rather than hanging it in the sky', () => {
+    // Six roads all crossing each other would need six levels. Four is a stack;
+    // more than that is a tagging problem, and one wrong junction beats a road at
+    // level nine.
+    const roads: ReturnType<typeof metreWay>[] = [];
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI;
+      roads.push(metreWay('primary', [i * 2 + 1, i * 2 + 2],
+        -Math.cos(a) * 100, -Math.sin(a) * 100, Math.cos(a) * 100, Math.sin(a) * 100));
+    }
+    const at = levels(roads);
+    for (const r of roads) expect(at.get(r.id)).toBeLessThanOrEqual(3);
   });
 });
 

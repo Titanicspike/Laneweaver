@@ -23,7 +23,7 @@
 
 import { lonLatToWorld } from '../geo/mercator';
 import { fitPolyline, simplifyPolyline } from '../geom/fit';
-import { bridgeSpans, findFlyovers, type BridgeSpan } from './flyovers';
+import { assignLevels, bridgeSpans, findCrossings, type BridgeSpan } from './flyovers';
 import { createDocument, issueId, makeControlPoint } from '../network/model';
 import type { ControlPoint, EditModel, RoadProfile, Stroke } from '../network/types';
 import type { Georeference } from '../geo/mercator';
@@ -121,8 +121,14 @@ export function importOsm(extract: OsmExtract, options: ImportOptions = {}): Imp
     const level = layerOf(tags);
     kept.push({ way, tags, level });
     for (const id of way.nodes ?? []) {
+      // The level a node sits at is the one nearest the ground of the ways meeting
+      // there, because that is the one they can all reach: a bridge comes down to
+      // the street it lands on and a tunnel comes up to it. Taking the minimum
+      // instead makes a tunnel mouth agree with the tunnel and not with the road.
       const at = nodeLevel.get(id);
-      nodeLevel.set(id, at === undefined ? level : Math.min(at, level));
+      nodeLevel.set(id, at === undefined ? level
+        : Math.abs(level) < Math.abs(at) || (Math.abs(level) === Math.abs(at) && level < at)
+          ? level : at);
       nodeUses.set(id, (nodeUses.get(id) ?? 0) + 1);
     }
   }
@@ -176,11 +182,29 @@ export function importOsm(extract: OsmExtract, options: ImportOptions = {}): Imp
     prepared.push({ way, tags, level, raw });
   }
 
-  // Where a road passes over one it shares no node with. Arc positions are along
-  // `raw` as it now stands, which is why the reversal above had to happen first.
-  const flyovers = findFlyovers(prepared.map((p) => ({
-    id: p.way.id, raw: p.raw, nodes: p.way.nodes ?? [], tags: p.tags,
-  })));
+  // Where roads cross without meeting, and what level each of them has to be on so
+  // that none of those crossings is a junction. Arc positions are along `raw` as it
+  // now stands, which is why the reversal above had to happen first.
+  const forLevels = prepared.map((p) => ({
+    id: p.way.id, raw: p.raw, nodes: p.way.nodes ?? [], tags: p.tags, base: p.level,
+  }));
+  const crossings = findCrossings(forLevels);
+  const offsets = assignLevels(forLevels, crossings);
+  // A way is raised over every crossing it takes part in, but only if it was given
+  // a level to be raised *to*: the road on the ground stays on the ground.
+  const raiseAt = new Map<number, number[]>();
+  const note = (index: number, at: number): void => {
+    if (offsets[index] <= 0) return;
+    const id = forLevels[index].id;
+    const list = raiseAt.get(id);
+    if (list) list.push(at);
+    else raiseAt.set(id, [at]);
+  };
+  for (const c of crossings) { note(c.a, c.sa); note(c.b, c.sb); }
+  const levelOf = new Map<number, number>();
+  for (let i = 0; i < forLevels.length; i++) {
+    if (offsets[i] > 0) levelOf.set(forLevels[i].id, forLevels[i].base + offsets[i]);
+  }
 
   for (const { way, tags, level, raw } of prepared) {
     const oneway = onewayOf(tags);
@@ -201,23 +225,29 @@ export function importOsm(extract: OsmExtract, options: ImportOptions = {}): Imp
     const pieces = cuts ? splitAt(raw, cuts) : [raw];
     // Only for an open way: a ring's arc positions are cut up by `loopCuts`, and a
     // roundabout that flies over something is not a shape worth the bookkeeping.
-    const spans = closed ? [] : bridgeSpans(flyovers.get(way.id) ?? [], lengthOf(raw));
+    const spans = closed ? [] : bridgeSpans(raiseAt.get(way.id) ?? [], lengthOf(raw));
+    const raisedTo = levelOf.get(way.id) ?? level + 1;
+
+    // What each end has to be by the time it gets there. Nodes were counted before
+    // any way was dropped, so a bridge still ramps down to a road that was itself
+    // filtered out. A way cut into pieces has no OSM node at the cuts, so only a
+    // whole way asks this.
+    const ends = pieces.length === 1 ? way.nodes ?? [] : [];
+    const meets = (nodeId: number | undefined): number =>
+      nodeId === undefined ? level : nodeLevel.get(nodeId) ?? level;
 
     let madeAny = false;
     for (const piece of pieces) {
       if (piece.length < 4 || lengthOf(piece) < opts.minLength) continue;
-      const points = spans.length
-        ? fitWithSpans(piece, opts.tolerance, spans, level)
-        : fitToControlPoints(piece, opts.tolerance);
+      const points = fitLevelled(piece, opts.tolerance, {
+        level,
+        startLevel: meets(ends[0]),
+        endLevel: meets(ends[ends.length - 1]),
+        spans,
+        raised: raisedTo,
+      });
       if (points.length < 2) continue;
       if (spans.length) report.flyovers += spans.length;
-      // Grade per point: the way's own level along it, dropping to whatever the ends
-      // actually meet. Nodes were counted before any way was dropped, so a bridge
-      // still ramps down to a road that was itself filtered out. A way carrying its
-      // own bridge spans has already had its grades set, and must keep them.
-      if (!spans.length) {
-        applyLevels(points, piece, pieces.length === 1 ? way.nodes ?? [] : [], nodeLevel, level);
-      }
 
       const stroke: Stroke = { id: issueId(model), profileId: profile.id, points };
       if (isRoundabout(tags)) stroke.roundabout = true;
@@ -456,57 +486,83 @@ function splitPolylineAt(raw: number[], positions: number[]): number[][] {
  * With the boundaries forced, every piece is wholly inside a span or wholly outside
  * one, and the grade is a property of the piece.
  */
-function fitWithSpans(
-  raw: number[], tolerance: number, spans: BridgeSpan[], base: number,
-): ControlPoint[] {
+/**
+ * How long a road takes to change level, in metres.
+ *
+ * It used to be however far apart the fit happened to put its last two control
+ * points, because the level was written onto the points the fit produced rather
+ * than the fit being told where a point was needed. On a way whose last span was
+ * two hundred metres that is a hundred metres of bridge reading as ground — long
+ * enough for the compiler to join it to something crossing underneath, which is a
+ * junction in mid-air — and it looked like whatever it happened to be.
+ *
+ * Thirty metres is short enough that the half of it which rounds to the lower level
+ * is fifteen, and long enough to read as a road climbing rather than a road
+ * stepping.
+ */
+const LEVEL_RAMP = 30;
+
+/** Where a way sits, and where it has to be by the time it reaches each end. */
+interface LevelPlan {
+  /** The way's own level, from its tags. */
+  level: number;
+  /** What each end must be to meet what is there, or `level` if nothing asks. */
+  startLevel: number;
+  endLevel: number;
+  /** Stretches raised over something the way crosses without meeting. */
+  spans: BridgeSpan[];
+  /** The level those stretches are raised to. */
+  raised: number;
+}
+
+/**
+ * Fits a way and puts every control point on the level its own place sits at.
+ *
+ * Splitting where the level changes is what makes the levels expressible: a level
+ * belongs to a control point, so a road can only change level between two of them,
+ * and the fit puts points where the road bends rather than where it climbs. With
+ * the boundaries forced, every piece is wholly at one level and the ramp is exactly
+ * as long as it was meant to be.
+ */
+function fitLevelled(raw: number[], tolerance: number, plan: LevelPlan): ControlPoint[] {
+  const total = lengthOf(raw);
+  const ramp = Math.min(LEVEL_RAMP, total / 3);
   const cuts: number[] = [];
-  for (const span of spans) cuts.push(span.rampFrom, span.from, span.to, span.rampTo);
-  const pieces = splitPolylineAt(raw, cuts);
+  if (plan.startLevel !== plan.level) cuts.push(ramp);
+  if (plan.endLevel !== plan.level) cuts.push(total - ramp);
+  for (const span of plan.spans) cuts.push(span.rampFrom, span.from, span.to, span.rampTo);
+  const pieces = cuts.length ? splitPolylineAt(raw, cuts) : [raw];
+
+  const levelAt = (mid: number): number => {
+    if (plan.spans.some((sp) => mid > sp.from && mid < sp.to)) return plan.raised;
+    if (plan.startLevel !== plan.level && mid < ramp) return plan.startLevel;
+    if (plan.endLevel !== plan.level && mid > total - ramp) return plan.endLevel;
+    return plan.level;
+  };
 
   const out: ControlPoint[] = [];
   let at = 0;
   for (const piece of pieces) {
     const start = at;
-    let len = 0;
-    for (let i = 2; i < piece.length; i += 2) {
-      len += Math.hypot(piece[i] - piece[i - 2], piece[i + 1] - piece[i - 1]);
-    }
+    const len = lengthOf(piece);
     at += len;
-    const mid = start + len * 0.5;
-    const raised = spans.some((sp) => mid > sp.from && mid < sp.to);
+    const grade = levelAt(start + len * 0.5);
     const points = fitToControlPoints(piece, tolerance);
     if (points.length < 2) continue;
-    for (const point of points) point.grade = base + (raised ? 1 : 0);
+    for (const point of points) point.grade = grade;
     if (!out.length) { out.push(...points); continue; }
     // The joint: the last point of the piece before and the first of this one are
     // the same place. Keep one, with the incoming handle from before and the
-    // outgoing from here, and give it the *higher* of the two grades — the abutment
-    // belongs to the bridge, so the ramp is the piece below it rather than a step.
+    // outgoing from here. Its level is the one *further from the ground* of the
+    // two, so the climb happens over the piece below rather than as a step at the
+    // abutment — and a tunnel mouth is the same shape upside down.
     const prev = out[out.length - 1];
     prev.hox = points[0].hox;
     prev.hoy = points[0].hoy;
-    prev.grade = Math.max(prev.grade, points[0].grade);
+    if (Math.abs(points[0].grade) > Math.abs(prev.grade)) prev.grade = points[0].grade;
     out.push(...points.slice(1));
   }
   return out;
-}
-
-/** Puts each control point on the level its own place along the way sits at. */
-function applyLevels(
-  points: ControlPoint[], raw: number[], nodes: number[],
-  nodeLevel: Map<number, number>, level: number,
-): void {
-  for (const p of points) p.grade = level;
-  if (level === 0 || points.length < 2) return;
-  // Only the ends can ramp, and only when what they meet is lower. Anything else —
-  // a bridge that starts in mid-air — is a tagging error rather than a road.
-  const endLevel = (nodeId: number | undefined): number =>
-    nodeId === undefined ? level : Math.min(level, nodeLevel.get(nodeId) ?? level);
-  const first = endLevel(nodes[0]);
-  const last = endLevel(nodes[nodes.length - 1]);
-  if (first !== level) points[0].grade = first;
-  if (last !== level) points[points.length - 1].grade = last;
-  void raw;
 }
 
 /** Total length of a flat [x,y,...] polyline. */

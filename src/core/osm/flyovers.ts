@@ -29,6 +29,17 @@ export interface FlyoverWay {
   raw: number[];
   nodes: number[];
   tags: Tags;
+  /** The level the tags already put it on: `layer`, `bridge`, `tunnel`. */
+  base: number;
+}
+
+/** One crossing that has to be separated, as indices into the way list. */
+export interface Crossing {
+  a: number;
+  b: number;
+  /** Arc position along each way, in metres. */
+  sa: number;
+  sb: number;
 }
 
 /**
@@ -98,10 +109,15 @@ function crossAt(
 }
 
 /**
- * Arc positions along each way where it passes **over** another it shares no node
- * with. Keyed by way id; ways with nothing to fly over do not appear.
+ * Every crossing that has to be separated: two ways that cross, share no node, and
+ * are not already on different levels because their tags said so.
+ *
+ * Which of the two goes over is *not* decided here. On a stack of four ramps that
+ * is not a pairwise question at all — deciding it one crossing at a time lands
+ * several of them on the same level, where the compiler wires them straight back
+ * together. See `assignLevels`.
  */
-export function findFlyovers(ways: FlyoverWay[]): Map<number, number[]> {
+export function findCrossings(ways: FlyoverWay[]): Crossing[] {
   const arcs = new Map<number, Float64Array>();
   const nodeSets = new Map<number, Set<number>>();
   for (const w of ways) {
@@ -140,9 +156,8 @@ export function findFlyovers(ways: FlyoverWay[]): Map<number, number[]> {
     }
   }
 
-  const rank = ways.map((w) => rankOf(w.tags));
   const len = ways.map((w) => lengthOf(w.raw));
-  const out = new Map<number, number[]>();
+  const out: Crossing[] = [];
   const seen = new Set<string>();
 
   for (const list of cells.values()) {
@@ -160,6 +175,9 @@ export function findFlyovers(ways: FlyoverWay[]): Map<number, number[]> {
           if (na.has(n)) { shares = true; break; }
         }
         if (shares) continue;
+        // Already on different levels because somebody tagged it. Nothing to do,
+        // and raising one of them again would only put it somewhere it is not.
+        if (wa.base !== wb.base) continue;
 
         const hit = crossAt(
           wa.raw[A.i], wa.raw[A.i + 1], wa.raw[A.i + 2], wa.raw[A.i + 3],
@@ -182,18 +200,64 @@ export function findFlyovers(ways: FlyoverWay[]): Map<number, number[]> {
         const sb = posOn(B, hit.u);
         if (sa < END_MARGIN || sa > len[A.w] - END_MARGIN) continue;
         if (sb < END_MARGIN || sb > len[B.w] - END_MARGIN) continue;
-
-        const aOver = rank[A.w] !== rank[B.w] ? rank[A.w] > rank[B.w]
-          : len[A.w] !== len[B.w] ? len[A.w] > len[B.w] : wa.id < wb.id;
-        const w = ways[aOver ? A.w : B.w];
-        const s = aOver ? sa : sb;
-        const at = out.get(w.id);
-        if (at) at.push(s);
-        else out.set(w.id, [s]);
+        out.push({ a: A.w, b: B.w, sa, sb });
       }
     }
   }
   return out;
+}
+
+/**
+ * How far above its own tagged level any one road may be pushed.
+ *
+ * Three is a four-level stack, which is as many as anybody builds. A road that
+ * would need more is left where it is: one wrong junction is better than a road
+ * hanging in the sky, and it is rare enough to be worth saying so rather than
+ * silently accommodating.
+ */
+const MAX_OFFSET = 3;
+
+/**
+ * A level for every way, such that no two ways that cross without meeting share one.
+ *
+ * This is a colouring, and it has to be, because at an interchange the question is
+ * not pairwise. Four ramps crossing over each other in the same hundred metres have
+ * six crossings between them, and answering each one on its own — "the bigger road
+ * goes over" — puts three of them on level 1, where they cross each other again and
+ * the compiler joins them right back up. That was 54 of the 184 crossings at the
+ * measured freeway interchange, which is what a broken stack looks like from here.
+ *
+ * Greedy, in ascending order of road class, so the small roads take the ground and
+ * the big ones are pushed up: a service road stays at 0, the arterial crossing it
+ * goes to 1, the motorway over both to 2, and a ramp over the motorway to 3. That
+ * ordering is the whole of the "which goes over" judgement, and it is the right one
+ * — the answer real interchanges give.
+ *
+ * Ties break on way id so that two runs of the same extract agree.
+ */
+export function assignLevels(ways: FlyoverWay[], crossings: Crossing[]): Int32Array {
+  const offset = new Int32Array(ways.length);
+  const neighbours: number[][] = ways.map(() => []);
+  for (const c of crossings) {
+    neighbours[c.a].push(c.b);
+    neighbours[c.b].push(c.a);
+  }
+
+  const order = ways.map((_, i) => i)
+    .filter((i) => neighbours[i].length > 0)
+    .sort((i, j) => rankOf(ways[i].tags) - rankOf(ways[j].tags) || ways[i].id - ways[j].id);
+
+  const done = new Uint8Array(ways.length);
+  const taken = new Set<number>();
+  for (const i of order) {
+    taken.clear();
+    for (const j of neighbours[i]) if (done[j]) taken.add(offset[j]);
+    let level = 0;
+    while (level <= MAX_OFFSET && taken.has(level)) level++;
+    offset[i] = level > MAX_OFFSET ? 0 : level;
+    done[i] = 1;
+  }
+  return offset;
 }
 
 /** A stretch of one way that is raised, in arc length, with its ramps outside it. */
