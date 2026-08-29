@@ -393,6 +393,16 @@ interface Lane {
 }
 ```
 
+**A connector's speed limit comes from the curvature it sustains, not from its worst vertex.**
+`maxCurvatureOver` measures over a fixed arc-length baseline of about a vehicle length, because that
+is the distance over which a car actually leans into a bend. Three adjacent samples of a flattened
+curve measure the *flattening*: the points sit centimetres apart where it once had to subdivide and
+metres apart where it did not, and a circumcircle through three nearly coincident points is
+numerically meaningless. One imported connector reported a **0.13 m radius at a single vertex out of
+fourteen whose median radius was 34 m**, and 138 straight-ahead movements in that one city were
+limited to 13 km/h by exactly that. Three points on a circle give back that circle whatever their
+spacing, so the baseline is exact where the geometry is real and rejects it where it is not.
+
 `parentS` is the load-bearing field. Lanes of a segment share their parent centreline's arc-length
 parameterisation, so `mapS(from, s, to)` converts a position on one lane to the exact equivalent
 cross-section on a neighbour. The merge model leans on this constantly — it is what lets a car on a
@@ -670,6 +680,14 @@ Compile steps, in order:
     roads at arterial scale get **signals**; comparable roads too small for signals get an
     **all-way stop**, which is what those junctions have in the real world. The user's choice
     overrides all of it and is persisted by position.
+
+    **And priority needs gaps somebody can judge.** Above `PRIORITY_MAX_SPEED` (90 km/h) there are
+    none: the major stream never pauses, so the minor arm is not slow to be served but never
+    served. That shows up first as vehicles stopped at the line for minutes and then as collisions,
+    because a driver who has waited that long is being asked to read a gap in traffic doing thirty
+    metres a second. Such a crossing is signalised whatever the pecking order looks like — it
+    outranks the all-way stop too, since a stop line across a motorway is not a control anybody
+    obeys. Real networks signalise or grade-separate these, and the compiler cannot build a bridge.
 13. Emit the road surface polygon, the marking polylines and the **road symbols** per segment, tapers
     included, so the renderer never re-derives road geometry. Symbols are paint that is a picture
     rather than a line: a lane-use arrow showing the movements each approach lane can actually make,
@@ -749,6 +767,30 @@ rate moves: an interval drawn at three in the morning is minutes long, so it swa
 ramp before it next looks, and one drawn at the evening peak keeps firing long after the peak has
 gone. Over a simulated day that lost **58% of all demand** and put the busiest hour at 20:00, at half
 the peak flow — a clock whose waves arrive whenever the traffic happens to allow is not a clock.
+
+**A driver is placed at a speed the road ahead allows.** A driver who has been travelling arrives
+at a queue, or at slower road, with the whole approach behind them to slow down in; one *created* at
+the edge of the network does not, and no car-following model can undo a vehicle put somewhere it
+could never have reached at that speed — it is at the emergency cap from its first tick and stays
+there until it hits something. On an imported freeway interchange that was almost every rear-end
+collision. Three things bound the entry speed, all with *this driver's* comfortable braking rather
+than the global one, because a truck stops at 1.5 m/s² where a car manages 2.0:
+
+- **What is queued past the end of the lane.** A road end in a city is metres from the junction it
+  feeds, so the queue a new arrival joins is usually on the *next* lane.
+- **How fast the road ahead is.** A five-metre entry lane onto a five-arm junction offers a 60 km/h
+  movement beside a 13 km/h one, so the walk is breadth-first over **every** way out — which one
+  this driver takes is not decided until the routing pass, and following the first successor spawns
+  them at the limit in front of the turn they are about to make.
+- **The gap being joined.** Matching the leader's speed is not enough: IDM asks for a *headway*, and
+  ten metres behind traffic doing 18 m/s is four seconds short of it however well the speeds agree.
+
+Requiring the *room* instead — a speed-aware minimum gap before the trip is placed at all — was
+tried and reverted. Turning a busy lane away changes when every later vehicle arrives, and the
+scenarios felt it as bunching: a 92 s wait at a four-way, a lost turn-on-red throughput win, and a
+collision through a peak. Demand that cannot be delivered on time is a real cost; a driver joining
+slowly and accelerating out of it is not. `npx tsx scratch/spawncheck.ts` prints, per document, how
+many vehicles are at the emergency cap on their first tick and which rule put them there.
 
 **Routing is a potential field, not a search.** For each destination portal we run one backward
 Dijkstra over the lane graph — lane changes are edges too — and keep `cost[laneId]`. Vehicles carry
@@ -1532,36 +1574,9 @@ All twelve are implemented and covered by tests.
 11. ✅ **Underlays** — image underlay, then georeferenced satellite tiles.
 12. ✅ **Procgen terrain** — generation, vectorisation, build constraints.
 
-Three things are known to be imperfect and are the next work, in this order:
+Two things are known to be imperfect and are the next work, in this order:
 
-1. **An at-grade priority crossing with a large speed or width mismatch.** A 110 km/h dual
-   carriageway crossed by a 45 km/h street produces the odd collision — one on `cross-skew-60` and
-   one on `cross-wide-narrow-skew` in `npx tsx scratch/simcheck.ts`. The junction is a hazard in
-   reality for the same reason, which is why real ones get signals or a bridge — but the invariant
-   here is zero and this is not zero.
-
-   **It is no longer latent, and three assertions are red because of it**: both cases in
-   `test/sim/committed-crossing.test.ts` and the collision assertion in `npm run bench`, all on the
-   bench's synthetic corridor, whose curving freeways cross their own ramps at grade at twelve
-   places. At `demandScale` 6 that gives 1 collision and 3 vehicles stopped over a minute at seed 1,
-   1 at seed 2, none at seed 3. The picture at the failure is two vehicles *already committed* on
-   crossing connectors of one box at 5.8 and 2.4 m/s, both braking at the 6 m/s² cap, bodies
-   overlapping at the point they share: by the time the predictive floor fires there is no room left
-   to use it. Priority is the wrong control for that junction and the model is being asked to save
-   it. Neither this session's trim rules, its ramp cut, nor the one-sided bay flare moves those
-   numbers by so much as a vehicle — the bench has no bays, no facing arms and no shallow crossings,
-   so its geometry is untouched by all of it (measured by reverting each in turn).
-
-   It got worse when the speed-limit look-ahead stopped bleeding everybody's speed off over the whole
-   approach, and that is worth understanding rather than reverting: the old rule was metering the
-   major road, so the minor road got gaps it has no right to expect. With the major road running at
-   its actual limit, `cross-wide-narrow-skew` starves and backs up — mean speed 8.8 m/s to 3.8, and
-   arrivals falling minute on minute. Starving the minor road is what a priority crossing of a fast
-   road *does*, and it is why the real ones are signalised; what is not acceptable is that the queue
-   then spills back and gridlocks the junction. The fix belongs in the same place as the collision:
-   this junction shape needs either the control choice to notice the mismatch, or gap acceptance that
-   copes with a stream that never pauses.
-2. **Junction boxes on the fuzzer's odder shapes.** `scratch/junctionfuzz.ts` still reports 2
+1. **Junction boxes on the fuzzer's odder shapes.** `scratch/junctionfuzz.ts` still reports 2
    shapes in 420 where the box reaches past the roads' caps by more than the kerb allowance, worst
    7.1 m, down from 25 at 17.1 m — most of the rest went with the facing-arm trim rule and the
    one-sided bay flare. It also reports 30 places where one road's paint lies inside another's
@@ -1570,7 +1585,7 @@ Three things are known to be imperfect and are the next work, in this order:
    ending short of a *curved* road by more than the compiler's tolerance simply do not join it
    (which is what was drawn), two eight-metre roads whose ends are twelve metres apart are two
    things, and the rest is paint on those same near-parallel five-arm shapes.
-3. **Weaving-section polish** beyond the current fused auxiliary lane.
+2. **Weaving-section polish** beyond the current fused auxiliary lane.
 
 Also outstanding: the outer lane of a **two-lane auxiliary stack on a curve** leaves its own asphalt
 at its first and last vertex — 1.0 m and 0.6 m outside, on a 322 m fused weaving lane on a 180 m
@@ -1579,16 +1594,39 @@ surface's extent for a stacked lane grows from zero across the taper while the l
 at its full offset from its first point, so the two disagree at exactly the ends. Nothing in the zoo
 has that combination, which is why it wants a case before it wants a fix.
 
-Also outstanding: on about 1.4% of fuzzed shapes the compiler's *own* generated signal plan trips
-its own validation — `signal-phase-conflict`, an error diagnostic on a plan nobody authored. Either
-the check has a false positive on irregular geometry or the generator has a real hole; it needs the
-same treatment.
+**Two long-standing defects were closed together, and how is worth keeping.** Both were in the
+*junction*, and in both cases the fix that suggested itself was in the simulation and the right one
+was in the compiler.
+
+- **An at-grade priority crossing with a large speed or width mismatch** produced collisions *and*
+  starved the minor arm, which then spilled back and gridlocked. It was the top known limitation for
+  a long time, and it made two assertions in `test/sim/committed-crossing.test.ts` red. Priority
+  control needs gaps somebody can judge; above about 90 km/h there are none, because the major
+  stream never pauses. The minor arm is then not slow to be served but never served, and a driver
+  who has waited minutes is being asked to read a gap in traffic doing thirty metres a second. The
+  compiler no longer builds one (`PRIORITY_MAX_SPEED`, step 12): it signalises, which is what a real
+  network does with the shape it cannot grade-separate.
+
+  The simulation-side fix was tried first and is recorded in `core/sim/junction.ts` rather than
+  taken. Extending the "a rival that cannot physically stop is coming" floor to *committed* rivals
+  removes the same collisions — and saturated, nearly every committed driver is near its conflict
+  point at speed, so all of them brake for each other: the four-way in `test/sim/approach.test.ts`
+  went from discharging 12 vehicles in its final minute to 8. A safety floor that fires on most of
+  the traffic is a control strategy wearing a safety floor's clothes.
+- **The compiler's own generated signal plan tripped its own validation** on about 1.4% of fuzzed
+  shapes — `signal-phase-conflict`, an error on a plan nobody authored. The generator paired arms
+  more than 150° apart into one phase and took facing each other as proof they did not conflict.
+  Where a two-way road is drawn as a one-way pair — most of a city centre, and most of an OSM
+  import — the two arms *do* face each other and their through movements still cross inside the box.
+  `axesOf` now verifies what it greens, using the same test the validator uses, against every arm
+  already in the group rather than only the one that started it. Zero in 420 fuzzed shapes and zero
+  across the eighteen imported cities.
 
 Roundabouts are the obvious next feature. None of it before merges are flawless.
 
 ## Testing strategy
 
-`npm test` runs 727 tests in about 130 s; the merge suite is most of that and is worth every
+`npm test` runs 739 tests in about 130 s; the merge suite is most of that and is worth every
 second. Two of them are red, both in `test/sim/committed-crossing.test.ts`, and they are the
 at-grade priority crossing under **Milestones** — not a flake and not something to re-run away.
 
@@ -1608,6 +1646,16 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   it. Plus `test/sim/stranded.test.ts`: a merger at the end of an acceleration lane gets in rather
   than chasing a gap that keeps moving away. Which seed shows that worst moves whenever anything
   upstream changes the arrival pattern, so it asserts the worst of a handful rather than one number.
+- **Placement** (`test/sim/spawn-speed.test.ts`): a driver is never *put* somewhere they could not
+  have reached at that speed — asserted on the spawn tick itself, where nothing has happened to them
+  except being placed, and restricted to the holds the entry speed actually governs (a merger
+  regulating against a gap is the merge model's business). One synthetic fixture built to be nasty —
+  a short fast stub whose ways out are one fast and several slow — plus all five shipped example
+  maps in the spawn mode each of them actually uses, where this used to happen to one spawn in
+  twenty.
+- **Junction control** (`test/network/junction-control.test.ts`): which control a crossing gets, and
+  in particular that a crossing of a road nobody can find a gap in is not left on priority — on the
+  speed rather than on the size of the road, and never over the document's own choice.
 - **Sim units** (`test/sim/`): IDM and MOBIL against hand-computed values, the safety floor, vehicle
   pose — the body stays on the lane through a turn, yaws into a lane change, settles out of it, and
   moves continuously across a lane boundary, and turns continuously whatever length it is —
@@ -1699,8 +1747,8 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   compiles a roundabout whose circulating traffic has priority and whose junctions are
   never all-way stops.
 - **Perf smoke** (`npm run bench`): 5,000 vehicles on a synthetic 287 km-of-lane freeway network.
-  Currently compile 72 ms, tick 4.8 ms median under Vitest and 2.8 ms under `tsx` (budget 6, see
-  the harness note below), street-level frame 1.0 ms.
+  Currently compile 68 ms, tick 2.3 ms median under Vitest (budget 6, see the harness note below),
+  street-level frame 0.6 ms.
   Compiling was 117 ms until the offsetter stopped allocating four typed arrays per call, stopped
   using `Math.hypot` where a `sqrt` does — V8's guards against overflow, and world coordinates are
   metres — and stopped hunting for self-intersections in offsets that cannot have folded. It is the
@@ -1708,11 +1756,11 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   times over a hundred and fifty thousand vertices.
 
   That tick number carries a harness cost worth knowing about: the identical network in the identical
-  state measures **2.7 ms** run under `tsx` and 4.5 ms under Vitest, and a raw arithmetic loop is the
+  state measures **1.3 ms** run under `tsx` and 2.3 ms under Vitest, and a raw arithmetic loop is the
   same speed in both. The difference is Vitest's module transform, which wraps every import and
   blocks cross-module inlining — and the hot loop calls into `idm`, `merge` and `junction` constantly.
-  The budget is asserted against the pessimistic number on purpose, but do not quote 4.5 ms as the
-  cost of a frame in a browser. It asserts **zero collisions** as well as the timings, and that assertion has earned its
+  The budget is asserted against the pessimistic number on purpose, but do not quote the Vitest
+  figure as the cost of a frame in a browser. It asserts **zero collisions** as well as the timings, and that assertion has earned its
   place: it is the only thing in the suite with three hundred conflict points, and it is what found
   the committed-crossing hole in the junction model.
 - **Stress** (`npx tsx scratch/townstress.ts [blocks] [demand]`, dev-only): builds a town far larger
@@ -1878,6 +1926,23 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
 - **Auxiliary lanes do not cross a joint.** Wiring lanes across a link or a split must filter them
   out first, or the cross-section mapping shifts by the number of auxiliary lanes and connects the
   wrong lanes — the failure looks like a downstream segment with no traffic at all.
+- **Curvature from adjacent samples measures the sampling.** An adaptively flattened curve has wildly
+  uneven point spacing, and the circumcircle through three nearly coincident points is numerically
+  meaningless — one vertex out of fourteen claimed a 0.13 m radius on a connector whose median was
+  34 m, and set the speed limit for all 27 m of it. Anything reading curvature off a sampled
+  polyline to make a *decision* wants `maxCurvatureOver` and a baseline; `curvatureAt` is still
+  right for the offsetter, which is asking about the samples themselves.
+- **A vehicle placed too fast is not a following-model failure.** Every rule in `core/sim` assumes a
+  driver arrived where they are by driving there. A spawned one did not, so the entry speed has to
+  do the work the approach would have done: see the spawn rules above. And when you bound it, bound
+  it against **every** successor — a short entry lane at a multi-arm junction has a fast way out and
+  a slow one, and the driver takes the one the router picks, not the one that happens to be first.
+- **A safety floor that fires on most of the traffic is a control strategy.** The "a rival that
+  cannot physically stop is coming" rule reads as if it should obviously apply to committed rivals
+  too. It does remove a class of collision, and saturated it costs a third of a junction's discharge
+  rate, because nearly every committed driver is near its conflict point at speed. When a floor
+  starts binding routinely, the thing that needs fixing is upstream of it — here, a junction the
+  compiler should never have put on priority control.
 - **GC churn**: any per-tick allocation in `core/sim` will eventually show up as frame hitches.
   Preallocate; reuse scratch buffers; note that a shared scratch object aliases if two call sites use
   it at once (`paramsOf` takes an `out` parameter for exactly this reason).
