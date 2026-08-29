@@ -23,7 +23,21 @@ export interface FetchRequest {
 /** Anything bigger than this is a download nobody wants to sit through by accident. */
 export const MAX_MILES = 4;
 
-export class ImportError extends Error {}
+export class ImportError extends Error {
+  /**
+   * Whether another server might answer differently.
+   *
+   * "The square you asked for has no drivable roads in it" is a fact about the
+   * square, and asking three servers in turn wastes half a minute to reach the same
+   * answer. "That server sent an empty document" is a fact about the server.
+   */
+  readonly retryable: boolean;
+
+  constructor(message: string, retryable = false) {
+    super(message);
+    this.retryable = retryable;
+  }
+}
 
 /**
  * Fetches a square from Overpass and imports it.
@@ -38,9 +52,16 @@ export async function fetchAndImport(req: FetchRequest): Promise<ImportResult> {
   const query = overpassQuery(box);
   const body = new URLSearchParams({ data: query }).toString();
 
-  let lastError = 'no endpoint answered';
+  // Every failure, not just the last one. These are free public servers run by
+  // volunteers: on any given try one is rate-limiting, one is down and one works,
+  // and which is which changes by the hour. Keeping only the last message means the
+  // user is told about whichever server happened to be asked last — the least
+  // relevant one — while the reason the *good* server refused is thrown away. That
+  // is exactly what happened the first time this was run against a live endpoint.
+  const failures: string[] = [];
   for (const endpoint of OVERPASS_ENDPOINTS) {
-    req.onProgress?.(`Asking ${new URL(endpoint).hostname} for ${miles.toFixed(1)} miles square…`);
+    const host = new URL(endpoint).hostname;
+    req.onProgress?.(`Asking ${host} for ${miles.toFixed(1)} miles square…`);
     try {
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -48,21 +69,31 @@ export async function fetchAndImport(req: FetchRequest): Promise<ImportResult> {
         body,
         signal: req.signal,
       });
-      if (!res.ok) { lastError = `${new URL(endpoint).hostname} answered ${res.status}`; continue; }
+      if (!res.ok) {
+        failures.push(`${host} answered ${res.status}${res.status === 429 ? ' (rate limited)' : ''}`);
+        continue;
+      }
       const text = await res.text();
       if (!text.trimStart().startsWith('{')) {
-        lastError = `${new URL(endpoint).hostname} sent something that is not map data`;
+        // Overpass reports its own errors as prose with a 200, so this is the
+        // common shape of "busy", not a corrupt download.
+        failures.push(`${host} sent a message rather than map data`
+          + ` ("${text.trim().replace(/\s+/g, ' ').slice(0, 80)}")`);
         continue;
       }
       req.onProgress?.(`Building the road network from ${(text.length / 1024 / 1024).toFixed(1)} MB…`);
       return importFromText(text, req.options);
     } catch (err) {
       if ((err as Error).name === 'AbortError') throw err;
-      lastError = `${new URL(endpoint).hostname}: ${(err as Error).message}`;
+      // A verdict about the data is not a verdict about the server: no other
+      // endpoint will find roads in a square that has none, and saying "could not
+      // download" sends somebody looking for a network problem they do not have.
+      if (err instanceof ImportError && !err.retryable) throw err;
+      failures.push(`${host}: ${(err as Error).message}`);
     }
   }
   throw new ImportError(
-    `Could not download the map data — ${lastError}. `
+    `Could not download the map data. ${failures.join('; ')}. `
     + `The area is about ${areaKm2(box).toFixed(1)} km²; try a smaller square, or again in a minute.`);
 }
 
@@ -76,7 +107,12 @@ export function importFromText(text: string, options?: ImportOptions): ImportRes
   }
   const elements = (parsed as { elements?: unknown }).elements;
   if (!Array.isArray(elements)) {
-    throw new ImportError('That file has no `elements`, so it is not an Overpass export.');
+    throw new ImportError('That file has no `elements`, so it is not an Overpass export.', true);
+  }
+  if (elements.length === 0) {
+    // Nothing at all came back. A working server would have said so with an error,
+    // so this is worth asking somebody else about.
+    throw new ImportError('That data is empty — no ways at all came back.', true);
   }
   const result = importOsm({ elements: elements as never }, options);
   if (!result.model.strokes.length) {
