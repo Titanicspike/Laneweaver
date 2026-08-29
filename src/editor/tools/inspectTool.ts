@@ -152,17 +152,40 @@ export class InspectTool implements Tool {
       const road = net.lanes[merge ? connector.successors[0] : connector.predecessors[0]];
       if (road) segments.add(road.segmentId);
     }
-    const aux: Lane[] = [];
+    // Every mainline lane with an end at the gore, not just the auxiliary ones: a
+    // through lane is where the interesting choices are — carry on *and* exit, or
+    // exit only — and offering only the auxiliary ones is why the tool could change
+    // which ramp lane fed which and nothing else.
+    const roadIn: Lane[] = [];
+    const roadOut: Lane[] = [];
     for (const segId of segments) {
-      for (const id of net.segments[segId]?.laneIds ?? []) {
+      const seg = net.segments[segId];
+      for (const id of seg?.laneIds ?? []) {
         const lane = net.lanes[id];
-        if (!lane.aux) continue;
         if (nearestDistance(lane, junction.x, junction.y) > lane.width * 4 + 12) continue;
-        aux.push(lane);
+        if (lane.aux) {
+          // An auxiliary lane already begins or ends here: a deceleration lane feeds
+          // the exit, an acceleration lane is fed by the entrance.
+          (merge ? roadOut : roadIn).push(lane);
+          continue;
+        }
+        // A through lane belongs to whichever half its own end is at — and to *both*
+        // when it has no end here at all, which is every mainline lane until
+        // something is wired: it arrives and it leaves, and "carries on" is the
+        // movement joining those two. Offering it on one side only is why the seed
+        // could not describe a lane that simply continues.
+        const ends = laneEndsAt(lane, junction.x, junction.y);
+        if (ends !== 'start') roadIn.push(lane);
+        if (ends !== 'end') roadOut.push(lane);
       }
     }
-    aux.sort((a, b) => Math.abs(a.offset) - Math.abs(b.offset) || a.id - b.id);
-    return merge ? { incoming: ramp, outgoing: aux } : { incoming: aux, outgoing: ramp };
+    const order = (a: Lane, b: Lane): number =>
+      Math.abs(a.offset) - Math.abs(b.offset) || a.id - b.id;
+    roadIn.sort(order);
+    roadOut.sort(order);
+    return merge
+      ? { incoming: [...ramp, ...roadIn], outgoing: roadOut }
+      : { incoming: roadIn, outgoing: [...ramp, ...roadOut] };
   }
 
   /** The movements currently wired by hand for this junction, if any. */
@@ -185,6 +208,22 @@ export class InspectTool implements Tool {
       const to = net.lanes[connector.successors[0]];
       if (!from || !to) continue;
       out.push({ from: laneKeyOf(from, net.segments), to: laneKeyOf(to, net.segments) });
+    }
+    // At a gore the through movements are part of the wiring too — the mainline is
+    // split there once anything is wired by hand, and the override then owns that
+    // carriageway completely. So they have to be in the seed: without them the very
+    // first movement anybody adds would take the through movements away with it, and
+    // one shift-click would end the motorway. A lane carrying on is written as
+    // itself, because either side of a split it is the same lane with the same name.
+    if (junction.kind === 'merge' || junction.kind === 'diverge') {
+      const sides = this.sides(net, junction);
+      for (const lane of sides.incoming) {
+        if (lane.aux || lane.kind === LaneKind.Connector) continue;
+        const key = laneKeyOf(lane, net.segments);
+        if (!sides.outgoing.some((l) => laneKeyOf(l, net.segments) === key)) continue;
+        if (out.some((l) => l.from === key && l.to === key)) continue;
+        out.push({ from: key, to: key });
+      }
     }
     return out;
   }
@@ -445,7 +484,8 @@ export class InspectTool implements Tool {
       this.wiring = { junction, from: lane };
       env.setStatus(junction.kind === 'crossing'
         ? 'Now click a lane leaving the junction. Click the same pair again to remove it.'
-        : 'Now click the auxiliary lane it should join. Click the same pair again to remove it.');
+        : 'Now click where it should go — the ramp, or the road carrying on. '
+          + 'Click the same pair again to remove it.');
       env.requestRender();
       return;
     }
@@ -763,6 +803,24 @@ function strokeLaneEnd(
 }
 
 /** Closest approach of a lane's centreline to a point. */
+/**
+ * Which of a lane's own ends is at this point, if either.
+ *
+ * Either side of a split the two halves of a mainline lane carry the same name, so
+ * the tool tells them apart by which one actually finishes here — and a lane that
+ * finishes neither way is one that runs straight past, which is both halves at once.
+ */
+function laneEndsAt(lane: Lane, x: number, y: number): 'end' | 'start' | 'through' {
+  const n = lane.centerline.length;
+  if (n < 4) return 'through';
+  const toEnd = Math.hypot(lane.centerline[n - 2] - x, lane.centerline[n - 1] - y);
+  const toStart = Math.hypot(lane.centerline[0] - x, lane.centerline[1] - y);
+  const reach = lane.width * 4 + 12;
+  if (toEnd < reach && toEnd <= toStart) return 'end';
+  if (toStart < reach) return 'start';
+  return 'through';
+}
+
 function nearestDistance(lane: Lane, x: number, y: number): number {
   let best = Infinity;
   for (let i = 0; i + 1 < lane.centerline.length; i += 2) {

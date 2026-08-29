@@ -898,6 +898,32 @@ export function paintApproaches(
 }
 
 /** The override authored for this junction, matched the way control choices are. */
+/**
+ * Whether a gore's hand-wiring names a *through* lane of the road it meets.
+ *
+ * Auxiliary lanes already begin or end at the gore, so wiring one needs nothing
+ * special. A through lane runs straight past — the mainline is deliberately not
+ * split at a merge or a diverge — so to branch off it, or to be joined by a ramp,
+ * it first has to have an end there. That is the same split an option lane asks
+ * for, and it is only made where the document actually wires one.
+ */
+export function goreWiresThroughLane(
+  all: ReadonlyArray<LaneLinkOverride>, plan: RampPlan, roadStrokeId: number,
+): boolean {
+  const override = findLaneLinks(all, plan.meeting.x, plan.meeting.y, 0);
+  if (!override) return false;
+  for (const link of override.links) {
+    for (const key of [link.from, link.to]) {
+      const parts = key.split(':');
+      if (parts.length < 3) continue;
+      if (Number(parts[0]) !== roadStrokeId) continue;
+      // Through lanes take slot 0 upward; auxiliary lanes take the negative ones.
+      if (Number(parts[2]) >= 0) return true;
+    }
+  }
+  return false;
+}
+
 function findLaneLinks(
   all: ReadonlyArray<LaneLinkOverride>, x: number, y: number, radius: number,
 ): LaneLinkOverride | null {
@@ -1009,10 +1035,18 @@ function wireLink(fromAll: Lane[], toAll: Lane[]): void {
   }
 }
 
-/** Same, for a plain split where the cross-section is unchanged. */
-function joinBySlot(from: Lane[], to: Lane[]): void {
+/**
+ * Same, for a plain split where the cross-section is unchanged.
+ *
+ * `handWired` is the carriageway a gore's own wiring has taken over, if any. Its
+ * through movements are named in the override along with the ramp's, because "this
+ * lane carries on" and "this lane exits" are the same choice made twice — and wiring
+ * them here as well would put the through movement back whatever the document said,
+ * which is the one arrangement a driver in an exit-only lane cannot use.
+ */
+function joinBySlot(from: Lane[], to: Lane[], handWired: 1 | -1 | 0 = 0): void {
   for (const lane of from) {
-    if (lane.aux) continue;
+    if (lane.aux || lane.side === handWired) continue;
     const dst = to.find((l) => !l.aux && l.index === lane.index);
     if (!dst) continue;
     lane.successors.push(dst.id);
@@ -1352,6 +1386,20 @@ export function buildJunctions(inputs: JunctionInputs): {
   }
 
   // --- plain splits: same stroke, no junction, lanes wire straight across --------
+  // Except where a gore's hand-wiring owns that carriageway: see `joinBySlot`.
+  const wiredSplits: { strokeIdx: number; s: number; side: 1 | -1 }[] = [];
+  for (const plan of rampPlans) {
+    const roadStrokeId = strokes[plan.roadStrokeIdx]?.stroke.id;
+    if (roadStrokeId === undefined) continue;
+    if (!goreWiresThroughLane(laneLinks, plan, roadStrokeId)) continue;
+    wiredSplits.push({ strokeIdx: plan.roadStrokeIdx, s: plan.sGoreRoad, side: plan.roadSide });
+  }
+  const takenOver = (strokeIdx: number, s: number): 1 | -1 | 0 => {
+    for (const w of wiredSplits) {
+      if (w.strokeIdx === strokeIdx && Math.abs(w.s - s) < 1) return w.side;
+    }
+    return 0;
+  };
   for (let a = 0; a < ranges.length; a++) {
     for (let b = 0; b < ranges.length; b++) {
       if (a === b) continue;
@@ -1362,8 +1410,9 @@ export function buildJunctions(inputs: JunctionInputs): {
       if (Math.abs(ra.s1 - rb.s0) > 0.01) continue;
       const first = lanesAt(lanes, segments[a], true);
       const second = lanesAt(lanes, segments[b], false);
-      joinBySlot(first.incoming, second.outgoing);
-      joinBySlot(second.incoming, first.outgoing);
+      const owned = takenOver(ra.strokeIdx, ra.s1);
+      joinBySlot(first.incoming, second.outgoing, owned);
+      joinBySlot(second.incoming, first.outgoing, owned);
     }
   }
 
@@ -1437,18 +1486,38 @@ export function buildJunctions(inputs: JunctionInputs): {
       for (const lane of isMerge ? rampLanes.incoming : rampLanes.outgoing) {
         rampSide.set(laneKeyOf(lane, segments), lane);
       }
-      const roadSide = new Map<string, Lane>();
+      // The road side is every mainline lane with an end at the gore, not just the
+      // auxiliary ones. A through lane only has an end here when the document wired
+      // one — the split is made for exactly that — and once it does, the choices a
+      // real gore offers all become expressible: a lane that carries on *and* exits,
+      // a lane that may only exit, two lanes feeding one ramp lane.
+      const roadIn = new Map<string, Lane>();
+      const roadOut = new Map<string, Lane>();
       for (const entry of auxStack) {
-        roadSide.set(laneKeyOf(lanes[entry.laneId], segments), lanes[entry.laneId]);
+        const lane = lanes[entry.laneId];
+        (isMerge ? roadOut : roadIn).set(laneKeyOf(lane, segments), lane);
       }
-      const resolved: { from: Lane; to: Lane }[] = [];
+      for (const { lane, incoming } of roadLanesAtGore(lanes, segments, ranges, plan)) {
+        (incoming ? roadIn : roadOut).set(laneKeyOf(lane, segments), lane);
+      }
+      const roadSide = isMerge ? roadOut : roadIn;
+      const resolved: { from: Lane; to: Lane; through: boolean }[] = [];
       for (const link of goreOverride.links) {
+        // A through movement: one mainline lane carrying on into the next. Written
+        // road to road, and at a split the two sides share a name, so the ends are
+        // told apart by which map they are looked up in rather than by the key.
+        const carryFrom = roadIn.get(link.from);
+        const carryTo = roadOut.get(link.to);
+        if (carryFrom && carryTo) {
+          resolved.push({ from: carryFrom, to: carryTo, through: true });
+          continue;
+        }
         // A merge runs ramp to road and a diverge road to ramp; naming them the
         // other way round would build a connector nobody can drive.
         const from = isMerge ? rampSide.get(link.from) : roadSide.get(link.from);
         const to = isMerge ? roadSide.get(link.to) : rampSide.get(link.to);
         if (from && to) {
-          resolved.push({ from, to });
+          resolved.push({ from, to, through: false });
           continue;
         }
         // Say which of the two it is. "That lane is gone" sends somebody looking for
@@ -1475,11 +1544,30 @@ export function buildJunctions(inputs: JunctionInputs): {
       }
       if (resolved.length) {
         wired = true;
-        for (const { from, to } of resolved) {
+        for (const { from, to, through } of resolved) {
+          if (through) {
+            // A plain joint, geometrically continuous: the lanes abut, so wiring
+            // them is a successor rather than a connector to drive round.
+            from.successors.push(to.id);
+            to.predecessors.push(from.id);
+            continue;
+          }
           const conn = buildConnector(lanes, junctionId, from, to,
             isMerge ? TurnKind.Merge : TurnKind.Diverge);
           connectorIds.push(conn.id);
           weightOf.set(conn.id, from.speedLimit);
+        }
+        // Hand-wiring replaces the whole set, through movements included, so it can
+        // leave a lane with no way out — which on a mainline is a hole in the road
+        // rather than a lane that merely ends. Say so; filling it back in would
+        // quietly undo the edit, the way it would at a crossing.
+        for (const lane of roadIn.values()) {
+          if (lane.successors.length || lane.mergeTarget >= 0) continue;
+          diagnostics.push({
+            severity: 'warning', code: 'lane-link-dead-end',
+            message: 'A lane runs into this gore with no way out of it.',
+            x: plan.meeting.x, y: plan.meeting.y,
+          });
         }
       } else {
         // Nothing usable: fall back rather than leaving a gore with no movements,
@@ -1545,10 +1633,20 @@ export function buildJunctions(inputs: JunctionInputs): {
         // auxiliary lanes of its own further along, and the corridor built to
         // that width stood nearly four metres proud of the ramp at the hand-over.
         capHalfWidth(segments[segId], plan.meeting.x, plan.meeting.y),
-        // How far the road's asphalt reaches beyond the middle of the auxiliary
-        // lanes this ramp feeds, which is where the blend corridor is centred.
-        segments[aux.segmentId].maxHalfWidth - auxStack.reduce(
-          (sum, e) => sum + Math.abs(lanes[e.laneId].offset), 0) / auxStack.length,
+        // How far the road's asphalt reaches beyond the innermost lane the blend
+        // actually leaves from, which is where its corridor is centred. The mean of
+        // the auxiliary lanes is that number only while those are the lanes in play:
+        // hand-wire a *through* lane to the ramp and the corridor starts several
+        // metres further in, so measuring from the mean leaves a couple of metres of
+        // the road's outer edge unpaved at the gore — a notch in the tarmac exactly
+        // where the eye follows the traffic off the carriageway.
+        segments[aux.segmentId].maxHalfWidth - Math.min(
+          ...connectorIds.map((id) => {
+            const road = lanes[isMerge ? lanes[id].successors[0] : lanes[id].predecessors[0]];
+            return road && road.segmentId === aux.segmentId
+              ? Math.abs(road.offset) : Math.abs(aux.offset);
+          }),
+          Math.abs(aux.offset)),
         plan.kind === 'merge',
       ),
       markings: goreMarkings(
@@ -1578,6 +1676,33 @@ export function buildJunctions(inputs: JunctionInputs): {
  * deceleration lane already has its own movement, and it is not the lane that
  * continues.
  */
+/**
+ * The mainline's own lanes with an end at a gore, and which way they run.
+ *
+ * There are only any when the road has been split there — which is what an option
+ * lane asks for, and what hand-wiring a through lane asks for. Only the carriageway
+ * the ramp meets: the other one runs past the gore untouched and is none of its
+ * business.
+ */
+function roadLanesAtGore(
+  lanes: Lane[], segments: Segment[], ranges: SegmentRange[], plan: RampPlan,
+): { lane: Lane; incoming: boolean }[] {
+  const out: { lane: Lane; incoming: boolean }[] = [];
+  for (let i = 0; i < ranges.length; i++) {
+    const range = ranges[i];
+    if (range.strokeIdx !== plan.roadStrokeIdx) continue;
+    const endsHere = Math.abs(range.s1 - plan.sGoreRoad) < 1;
+    const startsHere = Math.abs(range.s0 - plan.sGoreRoad) < 1;
+    if (!endsHere && !startsHere) continue;
+    const { incoming, outgoing } = lanesAt(lanes, segments[i], endsHere);
+    for (const lane of endsHere ? incoming : outgoing) {
+      if (lane.aux || lane.side !== plan.roadSide) continue;
+      out.push({ lane, incoming: endsHere });
+    }
+  }
+  return out;
+}
+
 function optionLaneAt(
   lanes: Lane[], segments: Segment[], ranges: SegmentRange[], plan: RampPlan,
 ): Lane | null {

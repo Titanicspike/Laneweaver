@@ -17,7 +17,7 @@ import { planLinks } from './links';
 import { planTurnLanes } from './turnLanes';
 import { buildSegments, gradeSplitPoints, planSegmentRanges } from './segments';
 import { buildCulDeSacs, planCulDeSacs } from './culdesac';
-import { buildJunctions, paintApproaches } from './junctions';
+import { buildJunctions, goreWiresThroughLane, paintApproaches } from './junctions';
 import { buildSignalPlan, validateSignalPlan } from './signals';
 import { validateNetwork } from './validate';
 import { gatewayOverrideAt, junctionOverrideAt } from '../model';
@@ -242,7 +242,8 @@ export function compile(model: EditModel): Network {
   // somewhere to branch from — the one place a diverge splits the road it leaves,
   // and only where the document asks for it.
   const optionSplits = rampPlans
-    .filter((p) => p.optionLane)
+    .filter((p) => p.optionLane
+      || goreWiresThroughLane(model.laneLinks, p, strokes[p.roadStrokeIdx].stroke.id))
     .map((p) => ({ strokeIdx: p.roadStrokeIdx, s: p.sGoreRoad }));
   const firstRanges = planSegmentRanges(strokes, meetings, rampCuts,
     [...auxSplitPoints(auxPlans), ...gradeSplitPoints(strokes), ...optionSplits]);

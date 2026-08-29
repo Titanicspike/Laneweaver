@@ -637,9 +637,19 @@ Compile steps, in order:
    through movements that have **no conflict points at all**. It needs a T (three arms, one with
    nothing opposite it) and a carriageway the stem can turn onto; anything else gets the ordinary
    allocation and a `right-in-right-out-shape` diagnostic. Left-in / left-out where traffic drives
-   on the left: the option is named for the common case and implemented as the kerb-side turn. Gores take an override too:
-   which lane of a multi-lane ramp joins which auxiliary lane is a real choice, and the lane-for-lane
-   pairing of step 7 is only the sensible default. A merge runs ramp to road and a diverge road to
+   on the left: the option is named for the common case and implemented as the kerb-side turn. Gores take an override too, and it covers **every lane of the road**, not just
+   the auxiliary ones: which lane of a multi-lane ramp joins which is a real choice, and so is
+   whether a through lane exits, carries on, or does both. That last pair is what an option lane and
+   an exit-only lane *are*, made per lane instead of per gore. A through lane runs straight past a
+   gore — the mainline is deliberately not split at one — so it has no end to branch from until the
+   road is split there, and that split is made exactly where the document wires one. The wiring then
+   owns that carriageway completely: through movements are named in it alongside the ramp's, written
+   road-to-road, and since the two halves of a split share a name they are told apart by which side
+   of the override they appear on. Leave one out and that lane is exit-only; leave a lane out of
+   everything and `lane-link-dead-end` says so rather than the compiler quietly filling it back in.
+   The editor seeds the set from the compiler's own answer, through movements included — without them
+   the first movement anybody added would take the through movements with it, and one shift-click
+   would end the motorway. A merge runs ramp to road and a diverge road to
    ramp, so a pair named the other way round is refused rather than built into a connector nobody
    can drive. Half a set would be worse than
    either, because the layout below assumes it owns every lane. Overrides name lanes
@@ -1284,7 +1294,11 @@ markings → signals) → vehicles (per grade) → editor overlays.
   junction was wired by hand. Click a junction to select it, which opens it in the signal
   panel; C cycles priority / all-way stop / signals.
   Shift-click a lane running in, then one running out, to wire that movement by hand — the first
-  edit seeds from what the compiler had, then each pair toggles. While wiring, the candidate lanes
+  edit seeds from what the compiler had, then each pair toggles. At a **gore** the lanes on offer are
+  the ramp's *and every lane of the road*: a through lane appears on both sides at once, because
+  until something is wired it is one lane that both arrives and leaves, and the movement joining
+  those two is "carries on". That is what makes an option lane, an exit-only lane and two lanes
+  funnelling into one expressible per lane rather than as a flag on the whole gore. While wiring, the candidate lanes
   light up at the **junction end only**: a lane runs the length of its road, and stroking the whole
   thing paints every street in view solid amber, which says nothing about a choice that is only
   about the junction. The arm the movement arrived on is left out, because the compiler refuses a
@@ -1466,7 +1480,7 @@ Roundabouts are the obvious next feature. None of it before merges are flawless.
 
 ## Testing strategy
 
-`npm test` runs 694 tests in about 130 s; the merge suite is most of that and is worth every
+`npm test` runs 697 tests in about 130 s; the merge suite is most of that and is worth every
 second. Two of them are red, both in `test/sim/committed-crossing.test.ts`, and they are the
 at-grade priority crossing under **Milestones** — not a flake and not something to re-run away.
 
@@ -1606,6 +1620,10 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   whose area or winding is wrong. It reports zero on all cases; when adding a check, break the
   compiler on purpose first and confirm the check fires.
 
+  `scratch/goreWiring.ts` compiles, audits and drives every sensible way to wire a two-lane gore by
+  hand — the default pairing, an option lane, an exit-only lane, two lanes funnelling into one, the
+  same for an entrance, and one deliberately left with a hole to prove the warning fires.
+
   **A tolerance has to be derived, not guessed.** The junction-box check compares against the convex
   hull of the caps that touch *that* junction, plus the junction itself. Taking every cap of every
   approaching segment instead — including the one at the road's far end — makes the hull a triangle
@@ -1733,6 +1751,12 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
 - **Cooperation must be sticky.** Re-deciding every tick which mainline driver yields to a merger
   means the gap never opens: the queue shuffles forward and a fresh driver inherits the job, over and
   over. Hold the commitment until the merger is in, gone, or already past.
+- **A hand-wired gore owns its carriageway, through movements and all.** An override replaces the
+  whole set — that rule is older than gores — so the moment the road's own lanes are on offer, the
+  through movements have to be in the set too, and in the seed. They are written road-to-road, and
+  the two halves of a split share a name, so which end is which comes from the side of the override
+  they appear on rather than from the key. Leave them out of the seed and the first movement anybody
+  adds deletes them: one shift-click, and the motorway stops at the gore.
 - **Auxiliary lanes do not cross a joint.** Wiring lanes across a link or a split must filter them
   out first, or the cross-section mapping shifts by the number of auxiliary lanes and connects the
   wrong lanes — the failure looks like a downstream segment with no traffic at all.

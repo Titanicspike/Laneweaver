@@ -287,6 +287,26 @@ export function cases(): Case[] {
     add(m, freeway(m, 3), pts(-1200, 200, -400, -60, 400, 40, 1200, -120));
     add(m, ramp(m, 1), pts(-700, 120, -450, 0, -250, -66));
   }, [-280, -40], 2.6);
+  // Gores wired by hand, now that the tool offers the mainline's own lanes: the
+  // kerb-side lane carrying on *and* exiting, and the same lane made exit-only.
+  // Both are arrangements a real interchange is built from and neither could be
+  // described while only the auxiliary lanes were on offer.
+  for (const [name, exitOnly] of [['gore-wired-option', false], ['gore-wired-exit-only', true]] as const) {
+    make(name, (m) => {
+      const fw = add(m, freeway(m, 3), line(-1200, 0, 1200, 0, 3));
+      const rp = add(m, ramp(m, 2), pts(0, 0, 200, 90, 500, 200));
+      // `strokeId:side:index`: through lanes count up from the kerb, auxiliary
+      // lanes take the negative slots, and a lane carrying on is written as itself.
+      const links = [{ from: `${fw.id}:1:0`, to: `${rp.id}:1:0` }];
+      for (let i = exitOnly ? 1 : 0; i < 3; i++) {
+        links.push({ from: `${fw.id}:1:${i}`, to: `${fw.id}:1:${i}` });
+      }
+      links.push({ from: `${fw.id}:1:-1`, to: `${rp.id}:1:1` });
+      links.push({ from: `${fw.id}:1:-2`, to: `${rp.id}:1:1` });
+      m.laneLinks.push({ x: 0, y: 0, links });
+    }, [90, 30], 2.2);
+  }
+
   // Cul-de-sacs: the turning head, the U-turn inside it, and the ring of houses
   // round it. Two widths, because the bulb is sized from the road it closes.
   const homeStreet = (m: EditModel, name: string, lanes: number, width: number) =>
