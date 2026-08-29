@@ -297,6 +297,19 @@ on the end, rather than a hundred and ten metres of road: the whole thing lands 
 was drawn. The radius comes from the road's own width, floored at 9 m — what a car can actually turn
 in, and what real residential heads are built to.
 
+**The head flares into the road, and its paint carries the road's across.** A plain circle at the end
+of a street is a lollipop — and it does not even meet the road: at the kerb the circle has already
+curved away, so there is a wedge of bare ground either side of the mouth, and the whole thing reads as
+a disc parked next to a street rather than the end of one. Real heads are built with kerb returns, and
+so is this: an arc tangent to the road's edge at one end and to the bulb at the other, so the kerb
+runs from the street round the head and back with no corner in it. The same outline, inset by one
+shoulder, is the head's **edge line** (`Junction.markings`, exactly as a gore carries the ramp's paint
+across the blend) — without it the road's paint stops dead across the carriageway and nothing but
+adjacency says the two are one road. The returns **follow the stroke's curve** rather than running
+straight out of the mouth: they reach twenty metres back up the road, and over that a residential bend
+moves the kerb a metre and a half sideways, which is a metre and a half of daylight in exactly the
+place the two lines have to meet.
+
 **The loop is sized from the kerb it has to clear, not from a fraction of the radius.** A cubic's
 apex sits at exactly three quarters of its handle (both control points are pushed the same distance
 in along the road, so the curve runs 3h·u(1−u) up that axis), and the mouth is one radius from the
@@ -1453,7 +1466,7 @@ Roundabouts are the obvious next feature. None of it before merges are flawless.
 
 ## Testing strategy
 
-`npm test` runs 693 tests in about 130 s; the merge suite is most of that and is worth every
+`npm test` runs 694 tests in about 130 s; the merge suite is most of that and is worth every
 second. Two of them are red, both in `test/sim/committed-crossing.test.ts`, and they are the
 at-grade priority crossing under **Milestones** — not a flake and not something to re-run away.
 

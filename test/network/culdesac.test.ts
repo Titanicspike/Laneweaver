@@ -40,6 +40,17 @@ function street(mark = true, lanes = 1, length = 200): EditModel {
 }
 
 const headOf = (net: Network) => net.junctions.find((j) => j.kind === 'culdesac');
+
+/** Whether a point is inside a ring, by the even-odd crossing count. */
+function inRing(ring: Float32Array, x: number, y: number): boolean {
+  const n = ring.length >> 1;
+  let inside = false;
+  for (let i = 0, k = n - 1; i < n; k = i++) {
+    const xi = ring[i * 2], yi = ring[i * 2 + 1], xj = ring[k * 2], yj = ring[k * 2 + 1];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
 const uTurnOf = (net: Network) => net.lanes.find(
   (l) => l.kind === LaneKind.Connector && l.turn === TurnKind.UTurn);
 
@@ -143,6 +154,62 @@ describe('a cul-de-sac', () => {
       // so a driver has been round it by the time they stop.
       const turn = uTurnOf(net)!;
       expect(f.head!.fromSide).toBe(net.lanes[turn.successors[0]].side);
+    }
+  });
+
+  it('flares into the road rather than abutting it', () => {
+    // A plain circle at the end of a street is a lollipop, and it does not even meet
+    // the road: at the kerb the circle has already curved away, leaving a wedge of
+    // bare ground either side of the mouth. The kerb returns are what close that —
+    // and what make the head read as the end of the street rather than a disc parked
+    // next to it.
+    for (const bend of [false, true]) {
+      const m = doc(3);
+      const home = addProfile(m, {
+        name: 'home', lanesForward: 1, lanesBackward: 1, laneWidth: 3.2,
+        speedLimit: kph(40), landUse: 'residential',
+      });
+      addStroke(m, home, bend
+        ? [...line(0, 0, 40, 120), ...line(40, 120, 10, 230)].filter((_, i, a) => i !== 2 || a.length > 0)
+        : line(0, 0, 0, 220));
+      m.gateways.push({ x: bend ? 10 : 0, y: bend ? 230 : 220, role: 'culdesac' });
+      const net = compile(m);
+      const head = headOf(net);
+      if (!head) continue;
+      const seg = net.segments.find((sg) => sg.endJunction === head.id || sg.startJunction === head.id)!;
+
+      // Both corners of the road's end are inside the head's own surface, so the
+      // union of the two has no notch in it.
+      const atEnd = seg.endJunction === head.id;
+      const cap = atEnd ? seg.capEnd : seg.capStart;
+      for (const k of [0, 2]) {
+        const x = cap[k] + (head.x - cap[k]) * 0.02;
+        const y = cap[k + 1] + (head.y - cap[k + 1]) * 0.02;
+        expect(inRing(head.footprint, x, y), `cap corner ${k / 2} outside the head`).toBe(true);
+      }
+
+      // And the head's own edge line meets the road's, rather than starting near it.
+      const paint = head.markings.find((mk) => mk.style === 'edge')!;
+      const ends = [[paint.points[0], paint.points[1]],
+        [paint.points[paint.points.length - 2], paint.points[paint.points.length - 1]]];
+      for (const [x, y] of ends) {
+        // To the line, not to its nearest vertex: an edge line is sampled every few
+        // metres, so a vertex can be a metre away from a point sitting exactly on it.
+        let best = Infinity;
+        for (const mk of seg.markings) {
+          if (mk.style !== 'edge') continue;
+          for (let i = 0; i < mk.points.length - 2; i += 2) {
+            const ax = mk.points[i], ay = mk.points[i + 1];
+            const bx = mk.points[i + 2], by = mk.points[i + 3];
+            const dx = bx - ax, dy = by - ay;
+            const l2 = dx * dx + dy * dy;
+            const t = l2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2)) : 0;
+            best = Math.min(best, Math.hypot(x - (ax + dx * t), y - (ay + dy * t)));
+          }
+        }
+        expect(best, `${bend ? 'curved' : 'straight'}: the head's paint stops ${best.toFixed(2)} m from the road's`)
+          .toBeLessThan(0.35);
+      }
     }
   });
 

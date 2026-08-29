@@ -63,6 +63,10 @@ export interface CulDeSacPlan {
   /** Arc-length on the stroke where the road now stops. */
   cutS: number;
   radius: number;
+  /** Half the road's asphalt, which the head's kerb returns flare out of. */
+  halfWidth: number;
+  /** The road's shoulder, so the edge line lands one shoulder inside the kerb. */
+  shoulder: number;
   /** Centre of the bulb: the point the user drew the road's end at. */
   x: number;
   y: number;
@@ -122,6 +126,11 @@ export function planCulDeSacs(
         atEnd,
         cutS: atEnd ? stroke.length - radius : radius,
         radius,
+        // `PreparedStroke.halfWidth` is the asphalt, shoulder included — which is
+        // what the kerb returns flare out of, and one shoulder outside the edge line
+        // they have to meet.
+        halfWidth: stroke.halfWidth,
+        shoulder: profile.shoulder,
         x: _p.x,
         y: _p.y,
         mouth,
@@ -169,22 +178,93 @@ export function headFrontageOf(plan: CulDeSacPlan, roadHalfWidth: number): Turni
 }
 
 /**
- * The bulb polygon: a circle at the head, overlapping the road it closes.
+ * The outline of the turning head: the circle, flared into the road's own edges.
  *
- * Drawn as one ring rather than unioned with the carriageway, because the segment's
- * own surface already runs a hand's width past its end cap for exactly this reason —
- * two fills that merely abut leave a hairline of casing showing between them.
+ * A plain circle at the end of a street is a lollipop. Worse, it does not even meet
+ * the road: at the kerb the circle has already begun to curve away, so between the
+ * road's end and the circle's flank there is a wedge of bare ground either side of
+ * the mouth, and the head reads as a disc parked next to a street rather than the
+ * end of it. Real ones are built with kerb returns, and so is this: an arc tangent to
+ * the road's edge at one end and to the bulb at the other, so the kerb line runs
+ * from the street round the head and back without a corner anywhere in it.
+ *
+ * Returned open, from one side of the mouth round to the other, because it is used
+ * twice: filled as the head's surface (the fill closes it across the mouth, over
+ * road the carriageway already covers) and stroked as the edge line that carries the
+ * road's own paint round the bulb. `inset` is what separates those two — the edge
+ * line is one shoulder inside the kerb, here as everywhere else.
  */
-export function bulbFootprint(plan: CulDeSacPlan): Float32Array {
-  const n = 48;
-  const out = new Float32Array(n * 2);
-  for (let i = 0; i < n; i++) {
-    const a = (i / n) * Math.PI * 2;
-    out[i * 2] = plan.x + Math.cos(a) * plan.radius;
-    out[i * 2 + 1] = plan.y + Math.sin(a) * plan.radius;
+export function bulbOutline(
+  plan: CulDeSacPlan, halfWidth: number, inset = 0, onRoad?: OnRoad,
+): Float32Array {
+  const R = plan.radius - inset;
+  const w = halfWidth - inset;
+  const ux = Math.cos(plan.mouth), uy = Math.sin(plan.mouth);
+  const nx = -uy, ny = ux;
+  // Straight out of the mouth is only true for a straight road. The returns run
+  // twenty metres back up it, and over that distance a residential bend moves the
+  // kerb a metre and a half sideways — which is a metre and a half of daylight
+  // between the head's paint and the road's, exactly where the two have to meet.
+  const at = (along: number, across: number): [number, number] =>
+    (onRoad && along > R ? onRoad(along, across) : null)
+    ?? [plan.x + ux * along + nx * across, plan.y + uy * along + ny * across];
+
+  const pts: number[] = [];
+  const push = (along: number, across: number): void => {
+    const [x, y] = at(along, across);
+    pts.push(x, y);
+  };
+  // A road nearly as wide as its own turning head has no room for a return; give it
+  // the plain circle rather than a fillet that doubles back on itself.
+  const fillet = R * FILLET_OF_RADIUS;
+  const feasible = w < R * 0.9 && fillet > (w * w) / (2 * (R - w));
+  if (!feasible) {
+    for (let i = 0; i <= BULB_STEPS; i++) {
+      const a = (i / BULB_STEPS) * Math.PI * 2;
+      push(Math.cos(a) * R, Math.sin(a) * R);
+    }
+    return Float32Array.from(pts);
   }
-  return out;
+
+  // Where the return's centre sits: one fillet outside the road's edge, and one
+  // fillet outside the bulb — which is what makes it tangent to both.
+  const cx = Math.sqrt((R + fillet) * (R + fillet) - (w + fillet) * (w + fillet));
+  const theta = Math.atan2(w + fillet, cx);
+  const arc = Math.PI / 2 - theta;
+
+  // The left return, from the road's edge round to the bulb.
+  const steps = Math.max(3, Math.round((arc / (Math.PI * 2)) * BULB_STEPS));
+  for (let i = 0; i <= steps; i++) {
+    const a = -Math.PI / 2 - (i / steps) * arc;
+    push(cx + Math.cos(a) * fillet, (w + fillet) + Math.sin(a) * fillet);
+  }
+  // Round the head the long way, from one return to the other.
+  const sweep = Math.PI * 2 - 2 * theta;
+  const round = Math.max(8, Math.round((sweep / (Math.PI * 2)) * BULB_STEPS));
+  for (let i = 0; i <= round; i++) {
+    const a = theta + (i / round) * sweep;
+    push(Math.cos(a) * R, Math.sin(a) * R);
+  }
+  // ...and the right return, which is the left one mirrored and walked backwards.
+  for (let i = steps; i >= 0; i--) {
+    const a = -Math.PI / 2 - (i / steps) * arc;
+    push(cx + Math.cos(a) * fillet, -((w + fillet) + Math.sin(a) * fillet));
+  }
+  return Float32Array.from(pts);
 }
+
+/**
+ * Puts a point of the straight mouth frame back on the road it came from.
+ *
+ * `along` is measured from the bulb centre back down the road and `across` to the
+ * left of that; returns null where the road no longer reaches.
+ */
+export type OnRoad = (along: number, across: number) => [number, number] | null;
+
+/** Kerb return, as a share of the bulb it flares into. */
+const FILLET_OF_RADIUS = 0.55;
+/** Points round a whole circle; the arcs take their share of it. */
+const BULB_STEPS = 64;
 
 /**
  * The lanes a U-turn runs between: innermost in to innermost out.
@@ -257,6 +337,25 @@ export function buildCulDeSacs(
     const connector = buildConnector(
       lanes, junctionId, pair.from, pair.to, TurnKind.UTurn, handle,
     );
+
+    // The kerb returns follow the road rather than a straight line out of the mouth.
+    // `along` is measured from the bulb centre, and the road's end is one radius
+    // back from it, so anything beyond that is this many metres inside the segment.
+    const onRoad: OnRoad = (along, across) => {
+      const s = plan.atEnd
+        ? seg.length - (along - plan.radius)
+        : along - plan.radius;
+      if (s < 0 || s > seg.length) return null;
+      samplePosition(seg.centerline, seg.arclength, s, _p);
+      sampleTangent(seg.centerline, seg.arclength, s, _t);
+      // The mouth frame faces back down the road, so its left is the segment's right
+      // at the end it closes, and its own right at the other.
+      const side = plan.atEnd ? -1 : 1;
+      return [
+        _p.x + -_t.y * across * side,
+        _p.y + _t.x * across * side,
+      ];
+    };
     // The end now belongs to a junction, which is what stops it being read as a
     // portal — an end of the network where traffic appears and disappears.
     if (plan.atEnd) seg.endJunction = junctionId;
@@ -269,8 +368,14 @@ export function buildCulDeSacs(
       y: plan.y,
       radius: plan.radius,
       grade: seg.grade,
-      markings: [],
-      footprint: bulbFootprint(plan),
+      markings: [{
+        // The road's edge line, carried round the head. Without it the paint stops
+        // dead across the carriageway and the bulb reads as a separate thing that
+        // happens to be adjacent — which is exactly what it looked like.
+        style: 'edge',
+        points: bulbOutline(plan, plan.halfWidth, plan.shoulder, onRoad),
+      }],
+      footprint: bulbOutline(plan, plan.halfWidth, 0, onRoad),
       connectorIds: [connector.id],
       approaches: [{
         segmentId: seg.id,
