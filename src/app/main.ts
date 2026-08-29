@@ -185,7 +185,11 @@ export class App implements AppApi {
       this.ui.setStatus(
         `Imported ${report.imported} roads (${report.strokes} strokes, ${report.profiles} road types)`
         + ` in ${(report.ms / 1000).toFixed(1)} s.`
-        + (report.roundabouts ? ` ${report.roundabouts} roundabouts.` : ''));
+        + (report.roundabouts ? ` ${report.roundabouts} roundabouts.` : '')
+        // Worth saying, because it is the one place the importer changes the shape
+        // of what was surveyed rather than just reading it: those roads cross
+        // without meeting, so one of them has been put on a bridge.
+        + (report.flyovers ? ` ${report.flyovers} bridges where roads cross without meeting.` : ''));
     } catch (err) {
       this.ui.setStatus((err as Error).message);
     } finally {
