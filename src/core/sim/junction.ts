@@ -334,7 +334,18 @@ export function applyJunctionRules(sim: Simulation, i: number): void {
       // middle. Braking here is a safety floor rather than a yield — it costs a
       // driver part-way across a few seconds — and it cannot freeze anybody
       // mid-junction, because a vehicle at or past the point returned long ago.
-      const rivalCannotStop = !committed && shares
+      //
+      // It deliberately stops there. Extending it to *committed* rivals looks like
+      // the obvious completion — a lower-ranked driver braking at the emergency cap
+      // and unable to stop inside it is read as yielding while the driver with
+      // priority accelerates into the space — and it does remove those collisions.
+      // But saturated, nearly every committed driver is near its point at speed, so
+      // all of them end up braking for each other: `test/sim/approach.test.ts` at
+      // 1.3x capacity went from discharging 12 vehicles in its final minute to 8.
+      // The junction shape that needed it is a fast road crossed at grade under
+      // priority, and that is fixed where it belongs — the compiler no longer
+      // builds one (see `PRIORITY_MAX_SPEED`).
+      const rivalCannotStop = shares && !committed
         && (otherV * otherV) / (2 * IDM.bMax) > Math.max(0, dOther - JUNCTION.stopMargin);
 
       if (yieldToRank || rivalCannotStop) {

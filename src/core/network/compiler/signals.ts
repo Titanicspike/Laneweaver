@@ -140,7 +140,9 @@ function clockwise(heading: number): number {
  * arm with nothing opposite it — the stem of a T, the fifth leg of a five-way — is
  * an axis of its own, which is what keeps the generator working on any geometry.
  */
-export function axesOf(approaches: Approach[]): Approach[][] {
+export function axesOf(
+  approaches: Approach[], mayShare?: (a: Approach, b: Approach) => boolean,
+): Approach[][] {
   const axes: Approach[][] = [];
   const used = new Set<Approach>();
   for (const a of approaches) {
@@ -149,10 +151,20 @@ export function axesOf(approaches: Approach[]): Approach[][] {
     used.add(a);
     for (const b of approaches) {
       if (used.has(b) || b.incomingLanes.length === 0) continue;
-      if (Math.abs(wrapAngle(a.heading - b.heading)) > (150 * Math.PI) / 180) {
-        group.push(b);
-        used.add(b);
-      }
+      if (Math.abs(wrapAngle(a.heading - b.heading)) <= (150 * Math.PI) / 180) continue;
+      // Facing each other is the *usual* reason two arms can run together, not a
+      // guarantee. Where a two-way road is drawn as a one-way pair — most of a city
+      // centre — the two arms face each other and their through movements still
+      // cross inside the box, because each is offset onto its own carriageway and
+      // the connectors swap sides. Greening both is then a phase that lets two
+      // streams drive through each other, which is what the plan's own validation
+      // says when it rejects the compiler's own default plan.
+      // Against everything already in the group, not just the arm that started it:
+      // on a six-arm junction b can be safe with a and cross c, and a phase is only
+      // as safe as its worst pair.
+      if (mayShare && group.some((in_) => !mayShare(in_, b))) continue;
+      group.push(b);
+      used.add(b);
     }
     axes.push(group);
   }
@@ -251,7 +263,28 @@ export function presetPhases(
     return fitCycle(phases);
   }
 
-  for (const axis of axesOf(approaches)) {
+  // Two arms may share a phase only if what they would green does not cross.
+  const throughOf = (arm: Approach): Id[] => groups
+    .filter((g) => approaches[g.approachIndex] === arm && g.letter === 'S')
+    .flatMap((g) => g.connectorIds);
+  const mayShare = (a: Approach, b: Approach): boolean => {
+    const bs = new Set(throughOf(b));
+    for (const id of throughOf(a)) {
+      const lane = lanes[id];
+      if (!lane || lane.turn !== TurnKind.Straight) continue;
+      for (const c of lane.conflicts) {
+        if (!bs.has(c.other)) continue;
+        const other = lanes[c.other];
+        if (!other || other.turn !== TurnKind.Straight) continue;
+        if (c.angle < CROSSING_BAND[0] || c.angle > CROSSING_BAND[1]) continue;
+        if (opposedDirections(lane, other)) continue;
+        return false;
+      }
+    }
+    return true;
+  };
+
+  for (const axis of axesOf(approaches, mayShare)) {
     const indices = new Set(axis.map((a) => indexOf.get(a) ?? -1));
     if (preset === 'permissive') {
       push(inApproach(indices, ['S', 'R', 'L', 'U']), TIMING.green);
@@ -488,6 +521,24 @@ export function validateSignalPlan(
   return out;
 }
 
+/** Beyond this the two movements are the same axis travelled both ways. */
+const OPPOSED_COS = -Math.cos((30 * Math.PI) / 180);
+
+/** Whether two connectors run in opposite directions overall. */
+function opposedDirections(a: Lane, b: Lane): boolean {
+  const dir = (l: Lane): [number, number] => {
+    const n = l.centerline.length;
+    if (n < 4) return [0, 0];
+    const dx = l.centerline[n - 2] - l.centerline[0];
+    const dy = l.centerline[n - 1] - l.centerline[1];
+    const len = Math.hypot(dx, dy) || 1;
+    return [dx / len, dy / len];
+  };
+  const [ax, ay] = dir(a);
+  const [bx, by] = dir(b);
+  return ax * bx + ay * by <= OPPOSED_COS;
+}
+
 /** A crossing, rather than a near-parallel or head-on brush between two curves. */
 const CROSSING_BAND = [(30 * Math.PI) / 180, (150 * Math.PI) / 180] as const;
 
@@ -514,6 +565,12 @@ export function crossingThroughPair(
       if (!other || other.turn !== TurnKind.Straight) continue;
       if (armOf.get(id) === armOf.get(conflict.other)) continue;
       if (conflict.angle < CROSSING_BAND[0] || conflict.angle > CROSSING_BAND[1]) continue;
+      // Two streams running in *opposite* directions are the two directions of one
+      // axis, and greening an axis is what a phase is for. They come up as separate
+      // arms whenever a two-way road is drawn as a one-way pair, which is most of a
+      // city centre — and their connectors do cross, because each is offset onto its
+      // own carriageway and the two are slightly skewed. Crossing splines, one road.
+      if (opposedDirections(lane, other)) continue;
       return true;
     }
   }

@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildArclength, polylineLength, segmentIndexForS, samplePosition, sampleTangent,
   sampleSmoothTangent, closestOnPolyline, makeClosestHit, subPolyline, resamplePolyline,
-  densify, reversePolyline, simplifyPolyline, curvatureAt, concatPolylines, bboxOfPolyline,
-} from '@core/geom/polyline';
+  densify, reversePolyline, simplifyPolyline, curvatureAt, concatPolylines, bboxOfPolyline, maxCurvatureOver } from '@core/geom/polyline';
 
 const line = Float32Array.from([0, 0, 10, 0, 10, 10]);
 
@@ -162,5 +161,65 @@ describe('bbox', () => {
   it('covers all points', () => {
     const b = bboxOfPolyline(line);
     expect(b).toEqual({ minX: 0, minY: 0, maxX: 10, maxY: 10 });
+  });
+});
+
+/**
+ * Curvature over a baseline, which is what sets a connector's speed limit.
+ *
+ * Three adjacent samples of a flattened curve measure the *sampling*, not the road:
+ * the flattener puts points centimetres apart where it bends and metres apart where
+ * it does not, and a circumcircle through three nearly coincident points is
+ * numerically meaningless. One imported connector reported a 0.13 m radius at a
+ * single vertex out of fourteen whose median radius was 34 m, and the whole 27 m
+ * straight-ahead movement was limited to 13 km/h because of it.
+ */
+describe('curvature over a baseline', () => {
+  /** An arc of a circle sampled unevenly, the way adaptive flattening leaves one. */
+  function arc(radius: number, sweep: number, spacings: number[]): Float32Array {
+    const out: number[] = [];
+    let a = 0;
+    let k = 0;
+    while (a <= sweep) {
+      out.push(Math.cos(a) * radius, Math.sin(a) * radius);
+      a += spacings[k++ % spacings.length] / radius;
+    }
+    return Float32Array.from(out);
+  }
+
+  it('reads a true arc exactly, whatever the baseline', () => {
+    // Three points on a circle give back that circle however far apart they are, so
+    // the baseline may be chosen for noise rejection without biasing real geometry.
+    const pts = arc(40, Math.PI / 2, [0.2, 3, 0.5, 2]);
+    for (const span of [0, 2, 5, 10]) {
+      expect(maxCurvatureOver(pts, span), `span ${span}`).toBeCloseTo(1 / 40, 3);
+    }
+  });
+
+  it('ignores a single vertex that is only noise', () => {
+    // A straight run, sampled the way the flattener actually leaves one: metres
+    // apart along the easy part and a cluster of near-coincident points where it
+    // once had to subdivide. A centimetre of float wobble inside that cluster is a
+    // 1 m radius vertex to vertex and nothing at all over five metres.
+    const pts: number[] = [];
+    for (let i = 0; i < 8; i++) pts.push(i * 1.4, 0);
+    pts.push(11.35, 0, 11.5, 0.01, 11.65, 0);
+    for (let i = 0; i < 8; i++) pts.push(13 + i * 1.4, 0);
+    const poly = Float32Array.from(pts);
+    expect(maxCurvatureOver(poly, 0)).toBeGreaterThan(0.5);  // vertex to vertex: a hairpin
+    expect(maxCurvatureOver(poly, 5)).toBeLessThan(0.005);   // over 5 m: a straight road
+  });
+
+  it('still finds a bend that is genuinely there', () => {
+    // The whole point is not to smooth away a real turn: a 9 m radius quarter circle
+    // is a tight junction connector and must still read as one.
+    expect(1 / maxCurvatureOver(arc(9, Math.PI / 2, [0.6]), 5)).toBeLessThan(10.5);
+  });
+
+  it('falls back to its own ends when it is shorter than the baseline', () => {
+    const pts = arc(12, Math.PI / 2, [0.5]);
+    expect(maxCurvatureOver(pts, 500)).toBeGreaterThan(0);
+    expect(maxCurvatureOver(Float32Array.from([0, 0, 1, 0]), 5)).toBe(0);
+    expect(maxCurvatureOver(Float32Array.from([]), 5)).toBe(0);
   });
 });

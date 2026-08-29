@@ -361,6 +361,57 @@ export function curvatureAt(poly: ArrayLike<number>, i: number): number {
   return (2 * (abx * bcy - aby * bcx)) / (ab * bc * ca);
 }
 
+/**
+ * The largest curvature the polyline sustains over a baseline of `span` metres.
+ *
+ * Curvature from three *adjacent* samples measures the sampling, not the road. An
+ * adaptively flattened curve puts its points centimetres apart where it bends and
+ * metres apart where it does not, and the circumcircle through three nearly
+ * coincident points is numerically meaningless: one imported connector reported a
+ * 0.13 m radius at a single vertex out of fourteen whose median radius was 34 m.
+ * Anything reading that maximum as a speed limit throttles the whole movement to
+ * walking pace — 138 straight-ahead movements in one city, each of which a driver
+ * then has to brake to 13 km/h for.
+ *
+ * A vehicle does not feel one vertex. Lateral acceleration is set by the curvature
+ * held for roughly its own length, so the triple is taken at a fixed arc-length
+ * baseline rather than at adjacent indices. On a true arc that is exact at any
+ * baseline — three points on a circle give back that circle whatever their spacing —
+ * so the span costs nothing where the geometry is real and rejects it where it is
+ * not. A polyline shorter than the baseline falls back to its own ends, which is the
+ * same question asked over the length available.
+ */
+export function maxCurvatureOver(poly: ArrayLike<number>, span: number): number {
+  const n = poly.length >> 1;
+  if (n < 3) return 0;
+  const s = new Float64Array(n);
+  for (let i = 1; i < n; i++) {
+    s[i] = s[i - 1]
+      + Math.hypot(poly[i * 2] - poly[i * 2 - 2], poly[i * 2 + 1] - poly[i * 2 - 1]);
+  }
+  const half = Math.max(EPS, span / 2);
+  let worst = 0;
+  let a = 0;
+  let c = 0;
+  for (let i = 1; i < n - 1; i++) {
+    while (a + 1 < i && s[i] - s[a + 1] >= half) a++;
+    if (c < i) c = i;
+    while (c + 1 < n && s[c] - s[i] < half) c++;
+    if (a >= i || c <= i) continue;
+    const ax = poly[a * 2], ay = poly[a * 2 + 1];
+    const bx = poly[i * 2], by = poly[i * 2 + 1];
+    const cx = poly[c * 2], cy = poly[c * 2 + 1];
+    const abx = bx - ax, aby = by - ay;
+    const bcx = cx - bx, bcy = cy - by;
+    const ab = Math.hypot(abx, aby);
+    const bc = Math.hypot(bcx, bcy);
+    const ca = Math.hypot(cx - ax, cy - ay);
+    if (ab < EPS || bc < EPS || ca < EPS) continue;
+    worst = Math.max(worst, Math.abs((2 * (abx * bcy - aby * bcx)) / (ab * bc * ca)));
+  }
+  return worst;
+}
+
 export interface Bbox {
   minX: number;
   minY: number;

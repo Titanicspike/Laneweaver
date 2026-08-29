@@ -9,8 +9,8 @@
  */
 
 import {
-  buildArclength, closestOnPolyline, curvatureAt, makeClosestHit, polylineLength,
-  samplePosition, sampleTangent, subPolyline,
+  buildArclength, closestOnPolyline, makeClosestHit, maxCurvatureOver,
+  polylineLength, samplePosition, sampleTangent, subPolyline,
 } from '../../geom/polyline';
 import { flattenCubicInto } from '../../geom/flatten';
 import { segmentIntersect, makeSegHit } from '../../geom/intersect';
@@ -94,6 +94,20 @@ function lanesAt(lanes: Lane[], seg: Segment, atEnd: boolean): { incoming: Lane[
   return { incoming, outgoing };
 }
 
+/**
+ * The speed above which an at-grade crossing cannot run on priority, in m/s.
+ *
+ * Ninety km/h: above any urban arterial, below motorway speeds. A crossing of a
+ * road this fast is signalised or grade-separated in every network that has one.
+ */
+const PRIORITY_MAX_SPEED = 90 / 3.6;
+
+/**
+ * How far a driver's lateral acceleration is averaged over, in metres — about a
+ * vehicle length, which is the distance over which a car actually leans into a bend.
+ */
+const CURVE_BASELINE = 5;
+
 /** Builds a smooth connector lane between two lane ends. */
 export function buildConnector(
   lanes: Lane[], junctionId: number, from: Lane, to: Lane, turn: TurnKind,
@@ -131,10 +145,9 @@ export function buildConnector(
   lane.side = 1;
   lane.parentS = lane.arclength;
 
-  let maxCurv = 0;
-  for (let i = 1; i < (centerline.length >> 1) - 1; i++) {
-    maxCurv = Math.max(maxCurv, Math.abs(curvatureAt(centerline, i)));
-  }
+  // Over a baseline rather than vertex to vertex: see `maxCurvatureOver`. A single
+  // noisy sample on a flattened cubic is not a bend anybody has to slow down for.
+  const maxCurv = maxCurvatureOver(centerline, CURVE_BASELINE);
   const geometricLimit = maxCurv > 1e-4 ? Math.sqrt(LATERAL_ACCEL / maxCurv) : Infinity;
   lane.speedLimit = Math.max(
     MIN_TURN_SPEED,
@@ -1372,7 +1385,20 @@ export function buildJunctions(inputs: JunctionInputs): {
     // The document can still ask for signals — some big ones are metered — but that
     // has to be a choice somebody made rather than the default.
     const circulating = approaches.some((a) => segments[a.segmentId]?.roundabout);
-    const useSignal = !riro && !circulating && approaches.length >= 3 && comparable && arterialScale;
+    // A priority crossing needs gaps somebody can actually judge. Above a certain
+    // speed there are none: the major stream never pauses, so the minor arm is not
+    // slow to be served but never served at all. That shows up first as vehicles
+    // stopped at the line for minutes on end, and then as collisions — a driver who
+    // has waited that long is being asked to read a gap in traffic doing thirty
+    // metres a second, and the ones who get it wrong are hit at that speed. Real
+    // networks do not leave these on priority: they signalise them or grade-separate
+    // them, and the compiler cannot build a bridge. It also outranks the all-way
+    // stop, because a stop line across a motorway is not a control anybody obeys.
+    const fastest = Math.max(0, ...live.flatMap(
+      (a) => a.incomingLanes.map((id) => lanes[id].speedLimit)));
+    const unyielding = fastest >= PRIORITY_MAX_SPEED;
+    const useSignal = !riro && !circulating && approaches.length >= 3
+      && ((comparable && arterialScale) || unyielding);
     // Comparable roads that are too small for signals get an all-way stop, which is
     // what these junctions have in the real world and the only control that shares
     // a small four-way fairly: a fixed priority order simply starves the last road.

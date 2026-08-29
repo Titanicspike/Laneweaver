@@ -111,6 +111,10 @@ const ARRIVE_MIN = 12;
  */
 const LEADER_HOPS = 16;
 
+/** How many lanes an entry-speed walk may look at, and how far ahead it may see. */
+const ENTRY_NODES = 64;
+const ENTRY_RANGE = 260;
+
 /**
  * Whether traffic on `lane` can use this address.
  *
@@ -616,6 +620,14 @@ export class Simulation {
     // that puts every exit-bound driver in one lane from the moment they appear and
     // leaves the rest to queue. Positioning for a turn is what the routing gradient
     // already does *en route*, where it can see the traffic.
+    // Room enough to stand, which is all this decides. Whether the gap is big
+    // enough to *travel* at the speed of the traffic is a question about speed, and
+    // it is answered by lowering the speed rather than by refusing the trip — see
+    // `entrySpeedCap`. Refusing was tried: a speed-aware requirement here turns a
+    // busy lane away, which changes when every later vehicle arrives, and the
+    // scenarios felt it as bunching (a 92 s wait at a four-way, a lost turn-on-red
+    // throughput win, a collision through a peak). Demand that cannot be delivered
+    // on time is a real cost; a driver joining slowly and accelerating is not.
     const need = spec.length + IDM.s0 + 4;
     let choices = 0;
     for (const laneId of portal.entryLanes) {
@@ -689,9 +701,15 @@ export class Simulation {
 
     const ahead = store.findAhead(laneId, at, -1);
     const behind = ahead >= 0 ? store.behind[ahead] : store.laneFirst[laneId];
-    const need = spec.length + IDM.s0 + 4;
-    if (ahead >= 0 && store.s[ahead] - store.len[ahead] - at < need) return false;
-    if (behind >= 0 && at - spec.length - store.s[behind] < need) return false;
+    // Speed-aware for the same reason as the portal path above, in both directions:
+    // pulling out ten metres in front of somebody doing 13 m/s makes *them* brake
+    // at the cap, which is the same defect seen from the other car.
+    const roomAhead = spec.length + IDM.s0
+      + (ahead >= 0 ? Math.max(2, store.v[ahead] * IDM.T) : 4);
+    const roomBehind = spec.length + IDM.s0
+      + (behind >= 0 ? Math.max(2, store.v[behind] * IDM.T) : 4);
+    if (ahead >= 0 && store.s[ahead] - store.len[ahead] - at < roomAhead) return false;
+    if (behind >= 0 && at - spec.length - store.s[behind] < roomBehind) return false;
 
     return this.place(pair, laneId, at, klass, spec, ahead);
   }
@@ -738,22 +756,65 @@ export class Simulation {
    * and in a city that lane is often a few metres of road with the whole queue on
    * the far side of the junction.
    */
-  private leaderDownstream(laneId: number, at: number): { gap: number; speed: number } {
+  /**
+   * The fastest a driver may be *put* on the road here.
+   *
+   * Two things downstream can make a speed impossible rather than merely
+   * uncomfortable, and both are invisible from the spawn lane alone: something
+   * queued past the end of it, and road that is simply slower. A driver who has
+   * been travelling arrives at either with the whole approach behind them to slow
+   * down in. One who is created here does not, and no following model can undo a
+   * car that was placed somewhere it could never have reached at that speed.
+   *
+   * Every way out, not the first one. Which way this driver goes is not decided
+   * until the routing pass, and a five-metre entry lane onto a five-arm junction
+   * offers a 60 km/h movement beside a 13 km/h one — so following one successor
+   * spawns drivers at the limit in front of the turn they are about to take. The
+   * walk is breadth-first and budgeted; a queue found on a branch ends it, because
+   * nothing past a stationary car constrains the speed you may arrive at.
+   *
+   * Comfortable braking on purpose: needing the emergency cap to survive your own
+   * spawn is the definition of being put somewhere you should not have been. And
+   * *this driver's* comfortable braking, not the global one — a truck stops at
+   * 1.5 m/s² where a car manages 2.0, so a cap worked out for the car puts the
+   * truck somewhere it can only leave by braking hard.
+   */
+  private entrySpeedCap(laneId: number, at: number, desired: number, b: number): number {
     const store = this.store;
     const lanes = this.net.lanes;
-    let dist = lanes[laneId].length - at;
-    let lane = laneId;
-    for (let hop = 0; hop < LEADER_HOPS && dist < 260; hop++) {
-      const next = lanes[lane].successors[0];
-      if (next === undefined) break;
-      const tail = store.laneLast[next];
-      if (tail >= 0) {
-        return { gap: dist + store.s[tail] - store.len[tail], speed: store.v[tail] };
+    const queue = this.entryQueue;
+    const dists = this.entryDist;
+    let cap = desired;
+    let head = 0;
+    let tail = 0;
+    queue[tail] = laneId;
+    dists[tail] = lanes[laneId].length - at;
+    tail++;
+    while (head < tail) {
+      const lane = queue[head];
+      const dist = dists[head];
+      head++;
+      if (dist > ENTRY_RANGE) continue;
+      const succ = lanes[lane].successors;
+      for (let k = 0; k < succ.length; k++) {
+        const next = succ[k];
+        const l = lanes[next];
+        const room = Math.max(0, dist);
+        cap = Math.min(cap, Math.sqrt(l.speedLimit * l.speedLimit + 2 * b * room));
+        const last = store.laneLast[next];
+        if (last >= 0) {
+          const behind = Math.max(0, dist + store.s[last] - store.len[last] - IDM.s0);
+          cap = Math.min(cap, Math.sqrt(store.v[last] * store.v[last] + 2 * b * behind));
+          continue;
+        }
+        if (tail < ENTRY_NODES) {
+          queue[tail] = next;
+          dists[tail] = dist + l.length;
+          tail++;
+        }
       }
-      dist += lanes[next].length;
-      lane = next;
     }
-    return { gap: Infinity, speed: 0 };
+    return cap;
   }
 
   private place(
@@ -783,22 +844,19 @@ export class Simulation {
     // Matching the car in front matters more than starting at the limit: arriving
     // at speed behind a stationary queue is a collision the first tick has to undo.
     //
-    // And the car in front is not always on this lane. A road end in a city is
-    // metres from the junction it feeds, so the queue a new arrival has to join is
-    // usually on the *next* lane — and spawning at the limit behind it is a driver
-    // appearing at a hundred kilometres an hour forty metres from a stationary car,
-    // which is not a following model failing, it is a car being put there. On an
-    // imported freeway interchange that was almost every rear-end collision.
-    let cap = desired;
+    // And what has to be matched is not always on this lane, nor is it always a
+    // car — see `entrySpeedCap`. On an imported freeway interchange those two
+    // between them were almost every rear-end collision.
+    let cap = this.entrySpeedCap(laneId, at, desired, store.bComf[i]);
     if (ahead >= 0) {
-      cap = Math.min(cap, store.v[ahead]);
-    } else {
-      const seen = this.leaderDownstream(laneId, at);
-      if (seen.gap < Infinity) {
-        // Fast enough to stop comfortably behind whatever is there.
-        const room = Math.max(0, seen.gap - IDM.s0);
-        cap = Math.min(cap, Math.sqrt(seen.speed * seen.speed + 2 * IDM.b * room));
-      }
+      // Matching the leader's speed is not enough on its own: what IDM asks for is
+      // a *headway*, and ten metres behind traffic doing 18 m/s is four seconds
+      // short of it however well the speeds agree. The driver is then at the
+      // emergency cap on their first tick and sends a shockwave up a road they
+      // have only just joined. Enter at the speed the gap supports and accelerate
+      // out of it, which is what a slip road does.
+      const gap = store.s[ahead] - store.len[ahead] - at;
+      cap = Math.min(cap, store.v[ahead], Math.max(0, (gap - IDM.s0) / store.headway[i]));
     }
     store.v[i] = Math.max(0, cap);
     // Stagger the first evaluation so the whole fleet does not think at once.
@@ -1407,6 +1465,11 @@ export class Simulation {
   }
 
   // --- lane advance and despawn ---------------------------------------------------
+
+  /** Scratch for `entrySpeedCap`: preallocated, because spawning happens every tick. */
+  private readonly entryQueue = new Int32Array(ENTRY_NODES);
+
+  private readonly entryDist = new Float64Array(ENTRY_NODES);
 
   private advancePass(): void {
     const store = this.store;

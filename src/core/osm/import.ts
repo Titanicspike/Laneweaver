@@ -58,7 +58,7 @@ export interface ImportOptions {
 export interface ImportReport {
   ways: number;
   imported: number;
-  skipped: { notDrivable: number; tooShort: number; degenerate: number };
+  skipped: { notDrivable: number; tooShort: number; degenerate: number; isolated: number };
   strokes: number;
   profiles: number;
   roundabouts: number;
@@ -105,7 +105,8 @@ export function importOsm(extract: OsmExtract, options: ImportOptions = {}): Imp
   const nodeUses = new Map<number, number>();
   const kept: { way: OsmWay; tags: Tags; level: number }[] = [];
   const report: ImportReport = {
-    ways: ways.length, imported: 0, skipped: { notDrivable: 0, tooShort: 0, degenerate: 0 },
+    ways: ways.length, imported: 0,
+    skipped: { notDrivable: 0, tooShort: 0, degenerate: 0, isolated: 0 },
     strokes: 0, profiles: 0, roundabouts: 0, controlPoints: 0, vertices: 0,
     bounds: { west: Infinity, south: Infinity, east: -Infinity, north: -Infinity }, ms: 0,
   };
@@ -123,12 +124,26 @@ export function importOsm(extract: OsmExtract, options: ImportOptions = {}): Imp
     }
   }
 
+  // A way that shares no node with any other is a fragment: the entrance to a car
+  // park whose aisles were filtered out, a driveway, a stub somebody drew and never
+  // joined up. Nothing can reach it, so it carries no traffic — it is litter on the
+  // map and a spawn point in the middle of nowhere. Unless it reaches the edge of the
+  // extract, where the road it connects to is simply outside the square.
+  const lonLatBounds = boundsOfKept(kept);
+  const isolated = new Set<number>();
+  for (const { way } of kept) {
+    if ((way.nodes ?? []).some((id) => (nodeUses.get(id) ?? 0) > 1)) continue;
+    if (touchesEdge(way, lonLatBounds)) continue;
+    isolated.add(way.id);
+  }
+
   const model = emptyModel();
   const source = new Map<number, number>();
   model.geo = { ...model.geo, lat: anchor.lat, lon: anchor.lon };
   const profiles = new ProfileTable(model);
 
   for (const { way, tags, level } of kept) {
+    if (isolated.has(way.id)) { report.skipped.isolated++; continue; }
     const geom = (way.geometry ?? []).filter((g): g is { lat: number; lon: number } => !!g);
     if (geom.length < 2) { report.skipped.degenerate++; continue; }
 
@@ -257,6 +272,31 @@ function markEnds(model: EditModel, report: ImportReport, opts: typeof DEFAULTS)
 
 /** How near the extract's edge an end has to be to count as leaving the map. */
 const EDGE_TOLERANCE = 30;
+
+/** The extract's extent in degrees, from the ways that survived the filter. */
+function boundsOfKept(kept: { way: OsmWay }[]): { s: number; w: number; n: number; e: number } {
+  let s = Infinity, w = Infinity, n = -Infinity, e = -Infinity;
+  for (const { way } of kept) {
+    for (const g of way.geometry ?? []) {
+      if (!g) continue;
+      s = Math.min(s, g.lat); n = Math.max(n, g.lat);
+      w = Math.min(w, g.lon); e = Math.max(e, g.lon);
+    }
+  }
+  return { s, w, n, e };
+}
+
+/** Whether a way reaches the edge of the extract, where its neighbours would be. */
+function touchesEdge(way: OsmWay, b: { s: number; w: number; n: number; e: number }): boolean {
+  const dLat = (b.n - b.s) * 0.01;
+  const dLon = (b.e - b.w) * 0.01;
+  for (const g of way.geometry ?? []) {
+    if (!g) continue;
+    if (g.lat - b.s < dLat || b.n - g.lat < dLat) return true;
+    if (g.lon - b.w < dLon || b.e - g.lon < dLon) return true;
+  }
+  return false;
+}
 
 /**
  * Where to cut a closed way, as vertex indices.
