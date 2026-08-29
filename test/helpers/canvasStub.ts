@@ -9,6 +9,11 @@
 export interface DrawCall {
   op: string;
   args: unknown[];
+  /** The context's style when the call was made; absent on a path's own ops. */
+  strokeStyle?: string;
+  fillStyle?: string;
+  lineWidth?: number;
+  globalAlpha?: number;
 }
 
 export class StubPath2D {
@@ -37,7 +42,16 @@ export class StubContext {
   private readonly stack: unknown[] = [];
 
   private record(op: string, args: unknown[]): void {
-    this.calls.push({ op, args });
+    // The style at the moment of the call, not at the end of the frame: a renderer
+    // sets `strokeStyle` and then strokes, over and over, and only the pairing says
+    // which colour drew which path.
+    this.calls.push({
+      op, args,
+      strokeStyle: this.strokeStyle,
+      fillStyle: this.fillStyle,
+      lineWidth: this.lineWidth,
+      globalAlpha: this.globalAlpha,
+    });
   }
 
   setTransform(...a: unknown[]): void { this.record('setTransform', a); }

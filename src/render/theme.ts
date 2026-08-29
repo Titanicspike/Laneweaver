@@ -24,6 +24,12 @@ export interface Theme {
   stopBar: string;
 
   bridgeShadow: string;
+  /**
+   * The parapet along a bridge deck: lighter than the casing, because that is what
+   * says *structure* rather than *edge of the road*. Occlusion alone tells you which
+   * road is on top and nothing about why.
+   */
+  bridgeParapet: string;
   tunnelAlpha: number;
 
   treeCrown: string;
@@ -102,7 +108,8 @@ export const DARK: Theme = {
   markingEdge: '#8d939c',
   stopBar: '#dfe3e8',
 
-  bridgeShadow: '#07080a',
+  bridgeShadow: '#050608',
+  bridgeParapet: '#5a6069',
   tunnelAlpha: 0.4,
 
   treeCrown: '#2c4232',
@@ -183,6 +190,8 @@ export const LOD = {
 export const WIDTHS = {
   /** Casing width added either side of the asphalt, metres. */
   casing: 0.55,
+  /** The parapet along a raised deck: wider than the casing, so it reads as built. */
+  parapet: 0.95,
   laneMarking: 0.14,
   edgeMarking: 0.16,
   doubleGap: 0.34,

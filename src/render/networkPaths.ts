@@ -57,8 +57,13 @@ export interface Tile {
   arrows: Path2D;
   /** Word markings, which need the text API and so cannot live in a Path2D. */
   words: RoadSymbol[];
-  /** Where a raised road throws its shadow, grown from the height of the road. */
+  /**
+   * Where a raised road throws its shadow, grown from the height of the road. Two
+   * of them, at different distances: a single hard-edged copy reads as a second
+   * road lying beside the first, and two make a falloff that reads as air.
+   */
   shadow: Path2D;
+  shadowFar: Path2D;
   /** Verge planting: crowns, then the lighter side of each one. */
   trees: Path2D;
   treeTops: Path2D;
@@ -108,6 +113,7 @@ function makeTile(grade: number, gx: number, gy: number): Tile {
     arrows: new Path2D(),
     words: [],
     shadow: new Path2D(),
+    shadowFar: new Path2D(),
     trees: new Path2D(),
     treeTops: new Path2D(),
     plotGround: new Path2D(),
@@ -414,6 +420,7 @@ export class NetworkPaths {
     addPolygon(tile.asphalt, segment.surface);
     addCasing(tile.casing, net, segment);
     addShadow(tile.shadow, segment.surface, segment.surfaceHeight);
+    addShadow(tile.shadowFar, segment.surface, segment.surfaceHeight, SHADOW_SPREAD);
 
     for (const marking of segment.markings) addMarking(tile, marking);
     for (const symbol of segment.symbols) {
@@ -736,8 +743,33 @@ function run(path: Path2D, ring: Float32Array, from: number, count: number): voi
   }
 }
 
-/** How far a road one grade up throws its shadow, metres. */
-export const SHADOW_OFFSET = { x: 1.6, y: 2.4 };
+/**
+ * How far a road one grade up throws its shadow, in metres, and how much further
+ * the outer layer of it reaches.
+ *
+ * It was a third of this, which on an eighteen-metre carriageway is a sliver a
+ * metre and a half wide — and on a road running the same way as the light, all of
+ * it hidden under the road itself. A bridge then had no cue at all beyond covering
+ * up the road beneath it, which says which one is on top and nothing about why.
+ */
+export const SHADOW_OFFSET = { x: 2.8, y: 4.2 };
+export const SHADOW_SPREAD = 1.55;
+
+/**
+ * How far the shadow moves for the *second* and later levels of a stack.
+ *
+ * Not linearly, which is what a real shadow does and what a four-level interchange
+ * cannot afford: at level three a linear offset puts the shadow twenty metres from
+ * the road that casts it, and twenty metres away it has stopped reading as a shadow
+ * and started reading as another dark road. Compressing it keeps the *order* legible
+ * — every level still sits above the one below — which is the only thing the shadow
+ * is being asked to say.
+ */
+const STACK_COMPRESSION = 0.45;
+
+function shadowHeight(h: number): number {
+  return h <= 1 ? h : 1 + (h - 1) * STACK_COMPRESSION;
+}
 
 /**
  * A raised road's shadow: the same ring, each point pushed by however high the road
@@ -751,7 +783,7 @@ export const SHADOW_OFFSET = { x: 1.6, y: 2.4 };
  * the joint — the segment either side of it is at the same height there.
  */
 function addShadow(
-  path: Path2D, ring: Float32Array, height: Float32Array | number,
+  path: Path2D, ring: Float32Array, height: Float32Array | number, spread = 1,
 ): void {
   const n = ring.length >> 1;
   if (n < 3) return;
@@ -761,7 +793,7 @@ function addShadow(
   for (let i = 0; i < n; i++) if (at(i) > 0.02) { lifted = true; break; }
   if (!lifted) return;
   for (let i = 0; i < n; i++) {
-    const h = at(i);
+    const h = shadowHeight(at(i)) * spread;
     const x = ring[i * 2] + SHADOW_OFFSET.x * h;
     const y = ring[i * 2 + 1] + SHADOW_OFFSET.y * h;
     if (i === 0) path.moveTo(x, y);

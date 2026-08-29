@@ -1171,8 +1171,22 @@ markings → signals) → vehicles (per grade) → editor overlays.
 - Geometry is baked into `Path2D` once per recompile and bucketed into 800 m tiles, so a large
   network only pays for what is on screen. Everything draws in world units with the camera transform
   applied, so line weights scale with zoom, with a pixel floor so nothing vanishes.
-- Tunnels (grade < 0): dashed casing, fill and vehicles at ~40% alpha. Bridges (grade > 0): solid
-  casing plus a dark offset shadow.
+- Tunnels (grade < 0): dashed casing, fill and vehicles at ~40% alpha. Bridges (grade > 0): a
+  **parapet** — lighter than the casing and wider — plus a two-layer drop shadow.
+  - **Occlusion says which road is on top and nothing about why.** Without a shadow a stacked
+    interchange is flat: every deck the same colour, the only cue being which one covers which.
+    The shadow is what carries the order, so it has to be big enough to read — a third of the
+    current offset was a metre and a half on an eighteen-metre carriageway, and on a road running
+    the same way as the light it was hidden under the road itself. The parapet is the second cue,
+    and a different one: that the road on top is *carried on something*. It runs along the deck
+    edges and stops at the abutments, because `Tile.casing` already leaves out any cap the road
+    drives through — which is exactly where a real parapet ends.
+  - **Two layers, the outer fainter.** One hard-edged copy of the deck offset sideways reads as a
+    second road lying alongside it; a pair reads as a falloff, which reads as air.
+  - **The offset is compressed above the first level.** A real shadow scales with height and a
+    four-level interchange cannot afford it: linearly, a level-three deck throws its shadow twenty
+    metres clear of the road casting it, where it stops being a shadow and becomes another dark
+    road. What has to survive is the *order*, not the arithmetic.
 - **A road that changes level is one road, and the joint is not an edge.** Grade lives on control
   points, so a bridge's ends are ramps and a segment boundary lands where the road passes each
   half-level; both sides are at the *same* height there. Two things have to respect that or the
@@ -1687,7 +1701,7 @@ Roundabouts are the obvious next feature. None of it before merges are flawless.
 
 ## Testing strategy
 
-`npm test` runs 754 tests in about 140 s; the merge suite is most of that and is worth every
+`npm test` runs 760 tests in about 140 s; the merge suite is most of that and is worth every
 second. Two of them are red, both in `test/sim/committed-crossing.test.ts`, and they are the
 at-grade priority crossing under **Milestones** — not a flake and not something to re-run away.
 

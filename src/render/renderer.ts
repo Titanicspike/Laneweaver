@@ -139,9 +139,17 @@ export class Renderer {
     // A raised road throws a shadow, so the stacking order reads at a glance. The
     // shape is baked from the road's own height rather than translated wholesale,
     // or a bridge lays a block of shadow across the road at its abutment.
+    //
+    // Two layers, the outer one fainter: one hard-edged copy of the deck offset
+    // sideways reads as a second road lying alongside, and the pair reads as a
+    // falloff, which reads as air. Both are grown from the *fractional* height, so
+    // a ramp's shadow opens out as it climbs — which is the whole of what makes a
+    // change of level look gradual rather than switched on.
     if (bridge || grade === 0) {
       ctx.fillStyle = theme.bridgeShadow;
-      ctx.globalAlpha = 0.55;
+      ctx.globalAlpha = 0.3;
+      for (const tile of tiles) ctx.fill(tile.shadowFar);
+      ctx.globalAlpha = 0.5;
       for (const tile of tiles) ctx.fill(tile.shadow);
       ctx.globalAlpha = tunnel ? theme.tunnelAlpha : 1;
     }
@@ -149,8 +157,14 @@ export class Renderer {
     // Casing: stroke the road's edges, then fill over the inner half of the stroke.
     // The outline used here leaves out any end cap the road drives straight through,
     // because a cap is only an edge where the road actually stops.
-    ctx.strokeStyle = theme.casing;
-    ctx.lineWidth = lineWidth(WIDTHS.casing * 2, camera.zoom);
+    // A raised deck gets a parapet: lighter than the casing and wider, because what
+    // it has to say is *structure*. Occlusion tells you which road is on top; the
+    // parapet is what tells you the top one is carried on something. It runs along
+    // the deck edges and stops at the abutments, because `Tile.casing` leaves out
+    // any cap the road drives straight through — which is exactly where a real
+    // parapet ends.
+    ctx.strokeStyle = bridge ? theme.bridgeParapet : theme.casing;
+    ctx.lineWidth = lineWidth((bridge ? WIDTHS.parapet : WIDTHS.casing) * 2, camera.zoom);
     if (tunnel) ctx.setLineDash([WIDTHS.tunnelDash[0], WIDTHS.tunnelDash[1]]);
     // Butt ends, because an outline left open at a joint would otherwise finish with
     // a round cap: a half-disc of casing sitting on the road at every abutment.

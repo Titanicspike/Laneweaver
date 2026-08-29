@@ -496,11 +496,13 @@ function splitPolylineAt(raw: number[], positions: number[]): number[][] {
  * enough for the compiler to join it to something crossing underneath, which is a
  * junction in mid-air — and it looked like whatever it happened to be.
  *
- * Thirty metres is short enough that the half of it which rounds to the lower level
- * is fifteen, and long enough to read as a road climbing rather than a road
- * stepping.
+ * Forty-five metres is about what a real bridge approach is, and the trade it makes
+ * is small in both directions: the half of it that rounds to the lower level is
+ * twenty-two, which across four cities costs six more junctions that should not be
+ * there (one of them on a fast road) than a thirty-metre ramp does — and it is long
+ * enough that the shadow opens out as a road climbing rather than switching on.
  */
-const LEVEL_RAMP = 30;
+const LEVEL_RAMP = 45;
 
 /** Where a way sits, and where it has to be by the time it reaches each end. */
 interface LevelPlan {

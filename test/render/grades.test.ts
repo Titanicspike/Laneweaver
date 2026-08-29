@@ -21,6 +21,7 @@ import { installCanvasGlobals, StubPath2D } from '../helpers/canvasStub';
 installCanvasGlobals();
 
 import { NetworkPaths, SHADOW_OFFSET } from '@render/networkPaths';
+import { DARK } from '@render/theme';
 import { Renderer } from '@render/renderer';
 import { StubCanvas, StubContext } from '../helpers/canvasStub';
 import { compile } from '@core/network/compiler';
@@ -32,7 +33,7 @@ import type { EditModel, Network, Segment } from '@core/network/types';
 const WORLD = { minX: -1e6, minY: -1e6, maxX: 1e6, maxY: 1e6 };
 
 /** A straight road that climbs to a bridge and comes back down to the ground. */
-function overpass(grade: 1 | -1): Network {
+function overpass(grade: number): Network {
   const model: EditModel = doc();
   const profile = addProfile(model, {
     name: 'arterial', lanesForward: 2, lanesBackward: 2, laneWidth: 3.5,
@@ -158,6 +159,63 @@ describe('a road that changes level', () => {
     expect(cast).toBeDefined();
     expect(cast!.points[0]! - ring[0]!).toBeCloseTo(SHADOW_OFFSET.x * 0.5, 2);
     expect(cast!.points[1]! - ring[1]!).toBeCloseTo(SHADOW_OFFSET.y * 0.5, 2);
+  });
+
+  it('does not move the shadow four times as far for a fourth level', () => {
+    // A shadow is what says which road is above which, and at a stacked interchange
+    // that has to keep working four levels up. Offset linearly, a level-three deck
+    // throws its shadow twenty metres clear of the road that casts it, where it has
+    // stopped reading as a shadow and started reading as another dark road.
+    const displacement = (grade: number): number => {
+      const net = overpass(grade);
+      const paths = new NetworkPaths(net);
+      const deck = net.segments.find((s) => s.grade === grade)!;
+      const cast = layer(paths, grade, 'shadow')
+        .find((sub) => sub.points.length === deck.surface.length);
+      expect(cast, `a level ${grade} deck casts a shadow`).toBeDefined();
+      // The furthest the shadow is thrown anywhere along the deck. Point zero is at
+      // the abutment, where every deck is half a level up whatever it climbs to, so
+      // comparing there compares two roads at the same height.
+      let worst = 0;
+      for (let i = 0; i < cast!.points.length; i += 2) {
+        worst = Math.max(worst, cast!.points[i]! - deck.surface[i]!);
+      }
+      return worst;
+    };
+    const one = displacement(1);
+    const three = displacement(3);
+    // Still ordered — a higher deck is still further out, or the stack stops reading
+    // at all — but compressed well below the three times a linear offset would give.
+    expect(three).toBeGreaterThan(one);
+    expect(three).toBeLessThan(one * 2.2);
+  });
+
+  it('cases a raised deck as a parapet and the ground as a kerb', () => {
+    // Occlusion says which road is on top and nothing about why. The parapet is the
+    // cue that says the top one is carried on something, so it has to be the thing
+    // that differs between a deck and the road it lands on.
+    const net = overpass(1);
+    const paths = new NetworkPaths(net);
+    const canvas = new StubCanvas();
+    const renderer = new Renderer(canvas as unknown as HTMLCanvasElement);
+    renderer.camera.fit(net.bounds, 60);
+    renderer.render({
+      network: net, paths, sim: null, alpha: 0,
+      terrain: null, underlay: null, geo: null,
+      showGrid: false, showDiagnostics: false, overlays: [],
+    });
+    const ctx = canvas.context as unknown as StubContext;
+    const styleOf = (grade: number): string | undefined => {
+      const casings = new Set(paths.query(grade, WORLD).map((t) => t.casing));
+      return ctx.calls.find((c) => c.op === 'stroke' && casings.has(c.args[0] as never))?.strokeStyle;
+    };
+    const deck = styleOf(1);
+    const ground = styleOf(0);
+    expect(deck).toBeDefined();
+    expect(ground).toBeDefined();
+    expect(deck).not.toBe(ground);
+    expect(deck).toBe(DARK.bridgeParapet);
+    expect(ground).toBe(DARK.casing);
   });
 
   it('leaves the casing open where the road drives straight through', () => {
