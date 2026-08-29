@@ -23,6 +23,7 @@
 
 import { lonLatToWorld } from '../geo/mercator';
 import { fitPolyline, simplifyPolyline } from '../geom/fit';
+import { bridgeSpans, findFlyovers, type BridgeSpan } from './flyovers';
 import { createDocument, issueId, makeControlPoint } from '../network/model';
 import type { ControlPoint, EditModel, RoadProfile, Stroke } from '../network/types';
 import type { Georeference } from '../geo/mercator';
@@ -62,6 +63,8 @@ export interface ImportReport {
   strokes: number;
   profiles: number;
   roundabouts: number;
+  /** Bridge spans raised because the ways crossed without sharing a node. */
+  flyovers: number;
   controlPoints: number;
   /** Vertices in, control points out: the fit's compression. */
   vertices: number;
@@ -107,7 +110,7 @@ export function importOsm(extract: OsmExtract, options: ImportOptions = {}): Imp
   const report: ImportReport = {
     ways: ways.length, imported: 0,
     skipped: { notDrivable: 0, tooShort: 0, degenerate: 0, isolated: 0 },
-    strokes: 0, profiles: 0, roundabouts: 0, controlPoints: 0, vertices: 0,
+    strokes: 0, profiles: 0, roundabouts: 0, flyovers: 0, controlPoints: 0, vertices: 0,
     bounds: { west: Infinity, south: Infinity, east: -Infinity, north: -Infinity }, ms: 0,
   };
 
@@ -142,6 +145,10 @@ export function importOsm(extract: OsmExtract, options: ImportOptions = {}): Imp
   model.geo = { ...model.geo, lat: anchor.lat, lon: anchor.lon };
   const profiles = new ProfileTable(model);
 
+  // Geometry first, for every way, because the next question needs all of it at
+  // once: which of these crossings are crossings at all (see `findFlyovers`).
+  interface Prepared { way: OsmWay; tags: Tags; level: number; raw: number[] }
+  const prepared: Prepared[] = [];
   for (const { way, tags, level } of kept) {
     if (isolated.has(way.id)) { report.skipped.isolated++; continue; }
     const geom = (way.geometry ?? []).filter((g): g is { lat: number; lon: number } => !!g);
@@ -166,7 +173,17 @@ export function importOsm(extract: OsmExtract, options: ImportOptions = {}): Imp
 
     const oneway = onewayOf(tags);
     if (oneway === -1) reverseInPlace(raw);
+    prepared.push({ way, tags, level, raw });
+  }
 
+  // Where a road passes over one it shares no node with. Arc positions are along
+  // `raw` as it now stands, which is why the reversal above had to happen first.
+  const flyovers = findFlyovers(prepared.map((p) => ({
+    id: p.way.id, raw: p.raw, nodes: p.way.nodes ?? [], tags: p.tags,
+  })));
+
+  for (const { way, tags, level, raw } of prepared) {
+    const oneway = onewayOf(tags);
     const spec = CLASS_SPECS[classOf(tags)];
     const lanes = lanesOf(tags, spec, oneway !== 0);
     const laneWidth = laneWidthOf(tags, spec, lanes);
@@ -182,16 +199,25 @@ export function importOsm(extract: OsmExtract, options: ImportOptions = {}): Imp
     const closed = (way.nodes?.length ?? 0) > 2 && way.nodes![0] === way.nodes![way.nodes!.length - 1];
     const cuts = closed ? loopCuts(way.nodes ?? [], raw, nodeUses) : null;
     const pieces = cuts ? splitAt(raw, cuts) : [raw];
+    // Only for an open way: a ring's arc positions are cut up by `loopCuts`, and a
+    // roundabout that flies over something is not a shape worth the bookkeeping.
+    const spans = closed ? [] : bridgeSpans(flyovers.get(way.id) ?? [], lengthOf(raw));
 
     let madeAny = false;
     for (const piece of pieces) {
       if (piece.length < 4 || lengthOf(piece) < opts.minLength) continue;
-      const points = fitToControlPoints(piece, opts.tolerance);
+      const points = spans.length
+        ? fitWithSpans(piece, opts.tolerance, spans, level)
+        : fitToControlPoints(piece, opts.tolerance);
       if (points.length < 2) continue;
+      if (spans.length) report.flyovers += spans.length;
       // Grade per point: the way's own level along it, dropping to whatever the ends
       // actually meet. Nodes were counted before any way was dropped, so a bridge
-      // still ramps down to a road that was itself filtered out.
-      applyLevels(points, piece, pieces.length === 1 ? way.nodes ?? [] : [], nodeLevel, level);
+      // still ramps down to a road that was itself filtered out. A way carrying its
+      // own bridge spans has already had its grades set, and must keep them.
+      if (!spans.length) {
+        applyLevels(points, piece, pieces.length === 1 ? way.nodes ?? [] : [], nodeLevel, level);
+      }
 
       const stroke: Stroke = { id: issueId(model), profileId: profile.id, points };
       if (isRoundabout(tags)) stroke.roundabout = true;
@@ -383,6 +409,86 @@ function fitToControlPoints(raw: number[], tolerance: number): ControlPoint[] {
     points.push(end);
   }
   return points;
+}
+
+/**
+ * Splits a flat polyline at the given arc positions, interpolating a vertex at each.
+ * Positions outside the polyline, or within a metre of one already there, are
+ * ignored: a piece a few centimetres long is not a piece of road.
+ */
+function splitPolylineAt(raw: number[], positions: number[]): number[][] {
+  const n = raw.length >> 1;
+  const arc = new Float64Array(n);
+  for (let i = 1; i < n; i++) {
+    arc[i] = arc[i - 1]
+      + Math.hypot(raw[i * 2] - raw[i * 2 - 2], raw[i * 2 + 1] - raw[i * 2 - 1]);
+  }
+  const total = arc[n - 1];
+  const cuts = [...new Set(positions)].filter((s) => s > 1 && s < total - 1).sort((a, b) => a - b);
+  if (!cuts.length) return [raw];
+
+  const pieces: number[][] = [];
+  let current: number[] = [raw[0], raw[1]];
+  let next = 0;
+  for (let i = 1; i < n; i++) {
+    while (next < cuts.length && cuts[next] <= arc[i]) {
+      const s = cuts[next++];
+      if (s <= arc[i - 1]) continue;
+      const t = (s - arc[i - 1]) / Math.max(1e-9, arc[i] - arc[i - 1]);
+      const x = raw[i * 2 - 2] + t * (raw[i * 2] - raw[i * 2 - 2]);
+      const y = raw[i * 2 - 1] + t * (raw[i * 2 + 1] - raw[i * 2 - 1]);
+      current.push(x, y);
+      if (current.length >= 4) pieces.push(current);
+      current = [x, y];
+    }
+    current.push(raw[i * 2], raw[i * 2 + 1]);
+  }
+  if (current.length >= 4) pieces.push(current);
+  return pieces.length ? pieces : [raw];
+}
+
+/**
+ * Fits a way that carries bridge spans, with the grades already on the points.
+ *
+ * Splitting at every span boundary is what makes the grades expressible at all: a
+ * level belongs to a control point, so the road can only be raised between two of
+ * them, and the fit puts points where the road bends rather than where it climbs.
+ * With the boundaries forced, every piece is wholly inside a span or wholly outside
+ * one, and the grade is a property of the piece.
+ */
+function fitWithSpans(
+  raw: number[], tolerance: number, spans: BridgeSpan[], base: number,
+): ControlPoint[] {
+  const cuts: number[] = [];
+  for (const span of spans) cuts.push(span.rampFrom, span.from, span.to, span.rampTo);
+  const pieces = splitPolylineAt(raw, cuts);
+
+  const out: ControlPoint[] = [];
+  let at = 0;
+  for (const piece of pieces) {
+    const start = at;
+    let len = 0;
+    for (let i = 2; i < piece.length; i += 2) {
+      len += Math.hypot(piece[i] - piece[i - 2], piece[i + 1] - piece[i - 1]);
+    }
+    at += len;
+    const mid = start + len * 0.5;
+    const raised = spans.some((sp) => mid > sp.from && mid < sp.to);
+    const points = fitToControlPoints(piece, tolerance);
+    if (points.length < 2) continue;
+    for (const point of points) point.grade = base + (raised ? 1 : 0);
+    if (!out.length) { out.push(...points); continue; }
+    // The joint: the last point of the piece before and the first of this one are
+    // the same place. Keep one, with the incoming handle from before and the
+    // outgoing from here, and give it the *higher* of the two grades — the abutment
+    // belongs to the bridge, so the ramp is the piece below it rather than a step.
+    const prev = out[out.length - 1];
+    prev.hox = points[0].hox;
+    prev.hoy = points[0].hoy;
+    prev.grade = Math.max(prev.grade, points[0].grade);
+    out.push(...points.slice(1));
+  }
+  return out;
 }
 
 /** Puts each control point on the level its own place along the way sits at. */

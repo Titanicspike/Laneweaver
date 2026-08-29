@@ -188,6 +188,30 @@ interface EditModel {
 }
 ```
 
+### Importing OpenStreetMap
+
+`core/osm` reads an Overpass extract into an edit model: tags to road profiles, surveyed
+polylines back to bezier control points (`core/geom/fit.ts`, the inverse of flattening), `layer` /
+`bridge` / `tunnel` to per-point grade, and a `gateways` spawn mode with the interior road ends
+closed so traffic enters only where the extract was cut.
+
+**Two ways that cross without sharing a node do not connect.** That is the one piece of topology a
+survey has and a hand-drawn document does not, and ignoring it was the largest single source of
+wrong network in an import: the compiler can only see geometry, so it wired every untagged flyover
+into the street beneath it — **752 junctions OSM does not have** across twenty imported squares, 229
+of them with a motorway or trunk road as an arm. A freeway with traffic lights on it, drivers
+leaving it in the middle of a span, and on the worst square almost no traffic completing its trip.
+`core/osm/flyovers.ts` finds those crossings and raises the bigger road over a span either side,
+ramping back down — which is what the compiler already understands, because grade lives on control
+points. The spans are fitted to the road available: ways between junctions are often eighty metres
+and a fixed span needs seventy-four, so a fixed one refused most of the bridges that most needed
+building. A span is still refused where it would reach a way's end, because the ends are where the
+junctions are.
+
+A way that *ends* near another it shares no node with is left alone: that is a T, no amount of
+raising makes it anything else, and a mapper forgetting a node on a service road is commoner than an
+untagged residential flyover. Those are most of what the measurement still counts.
+
 `settings.spawnMode` decides where traffic comes from, and the three answers are
 genuinely different questions rather than three dials on one:
 
@@ -1641,7 +1665,7 @@ Roundabouts are the obvious next feature. None of it before merges are flawless.
 
 ## Testing strategy
 
-`npm test` runs 742 tests in about 130 s; the merge suite is most of that and is worth every
+`npm test` runs 754 tests in about 140 s; the merge suite is most of that and is worth every
 second. Two of them are red, both in `test/sim/committed-crossing.test.ts`, and they are the
 at-grade priority crossing under **Milestones** — not a flake and not something to re-run away.
 
