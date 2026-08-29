@@ -7,7 +7,7 @@
 
 import { kph, profileHalfWidth, toKph } from '../core/network/model';
 import type {
-  EditModel, GeoSettings, LandUse, RoadProfile, SpawnMode, ZoneChoice,
+  EditModel, GeoSettings, LandUse, RoadProfile, SpawnMode, ZoneChoice,  Diagnostic,
 } from '../core/network/types';
 import { tileStats } from '../render/underlayLayer';
 import {
@@ -43,6 +43,7 @@ export interface AppApi {
   save(): void;
   load(file: File): void;
   loadDemo(): void;
+  importOsmAt(lat: number, lon: number, miles: number): Promise<void>;
   fitView(): void;
   focusOn(x: number, y: number): void;
   addProfile(base: RoadProfile): void;
@@ -62,6 +63,8 @@ export interface AppApi {
   requestRender(): void;
   renderMs(): number;
 }
+
+import { MAX_MILES } from './osmImport';
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.round(Math.max(lo, Math.min(hi, v)) * 1000) / 1000;
@@ -298,7 +301,40 @@ export class Ui {
     const exampleRow = el('div', { class: 'row', style: { marginTop: '6px' } }, examples);
 
     return panel('toolbar', 'Laneweaver',
-      el('div', { class: 'body' }, tools, grades, this.zoneRow, fileRow, viewRow, exampleRow));
+      el('div', { class: 'body' }, tools, grades, this.zoneRow, fileRow, viewRow, exampleRow,
+        this.importRow()));
+  }
+
+  /**
+   * Import a square of the real world.
+   *
+   * A coordinate and a size, because that is how somebody says where they mean —
+   * and paste-able, since a coordinate copied from a map is two numbers with a
+   * comma between them. The size is capped: the download is somebody else's
+   * server's time, and a whole city is more road than anyone can edit.
+   */
+  private importRow(): HTMLElement {
+    const where = el('input', {
+      type: 'text', class: 'grow', value: '37.3303843, -122.0490306',
+      title: 'Latitude and longitude, as you would paste them from a map',
+    }) as HTMLInputElement;
+    const miles = el('input', {
+      type: 'number', value: '2', step: '0.5', min: '0.1', max: String(MAX_MILES),
+      style: { width: '52px' }, title: 'Size of the square, in miles',
+    }) as HTMLInputElement;
+    const go = el('button', { class: 'ghost', text: 'Import' }) as HTMLButtonElement;
+    go.addEventListener('click', () => {
+      const [lat, lon] = where.value.split(/[ ,]+/).map(Number);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        this.setStatus('Give a latitude and a longitude, like 37.3304, -122.0490.');
+        return;
+      }
+      go.disabled = true;
+      void this.app.importOsmAt(lat, lon, Number(miles.value) || 2).finally(() => {
+        go.disabled = false;
+      });
+    });
+    return el('div', { class: 'row', style: { marginTop: '6px' } }, where, miles, go);
   }
 
   private openFile(): void {
@@ -680,15 +716,37 @@ export class Ui {
     }
     const list = el('div', { class: 'diag' });
     const order = { error: 0, warning: 1, info: 2 };
-    const sorted = [...diagnostics].sort((a, b) => order[a.severity] - order[b.severity]);
-    for (const d of sorted.slice(0, 40)) {
+    // Grouped by what the problem *is*, not listed one per occurrence. A drawn
+    // document has a handful and a list is right; an imported city has six hundred,
+    // four hundred of which are the same sentence, and a list of those says only
+    // that something is wrong somewhere. Clicking still goes to one of them.
+    const groups = new Map<string, { severity: Diagnostic['severity']; message: string; items: Diagnostic[] }>();
+    for (const d of diagnostics) {
+      const key = `${d.severity}|${d.code}`;
+      const g = groups.get(key);
+      if (g) g.items.push(d);
+      else groups.set(key, { severity: d.severity, message: d.message, items: [d] });
+    }
+    const sorted = [...groups.values()].sort(
+      (a, b) => order[a.severity] - order[b.severity] || b.items.length - a.items.length);
+    let shown = 0;
+    for (const g of sorted) {
+      if (shown++ >= 24) break;
+      let at = 0;
       list.append(el('div', {
         class: 'item',
-        onclick: () => { if (d.x !== undefined && d.y !== undefined) this.app.focusOn(d.x, d.y); },
-      }, el('div', { class: `dot ${d.severity}` }), el('div', { class: 'msg', text: d.message })));
+        title: g.items.length > 1 ? 'Click to visit each one in turn' : undefined,
+        onclick: () => {
+          // Round the group, one per click, so a repeated problem can be walked.
+          const d = g.items[at++ % g.items.length];
+          if (d.x !== undefined && d.y !== undefined) this.app.focusOn(d.x, d.y);
+        },
+      },
+      el('div', { class: `dot ${g.severity}` }),
+      el('div', { class: 'msg', text: g.items.length > 1 ? `${g.message} (${g.items.length})` : g.message })));
     }
-    if (sorted.length > 40) {
-      list.append(el('div', { class: 'empty', text: `and ${sorted.length - 40} more` }));
+    if (sorted.length > shown) {
+      list.append(el('div', { class: 'empty', text: `and ${sorted.length - shown} more kinds` }));
     }
     this.diagBody.append(list);
   }

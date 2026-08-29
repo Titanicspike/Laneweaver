@@ -19,6 +19,18 @@ import type { PreparedStroke } from './prepare';
 export const NEAR_PARALLEL_ANGLE = (8 * Math.PI) / 180;
 /** At or below this, an endpoint meeting is a ramp rather than a T-junction. */
 export const SHALLOW_ANGLE = (30 * Math.PI) / 180;
+/**
+ * Below this, a road is not one anybody builds a gore on.
+ *
+ * A merge or a diverge is an acceleration lane, a taper and a gore: the arrangement
+ * that exists because traffic joining a fast road has to get up to speed first. On a
+ * road where it does not, the shallow join is just a corner — and a car park's
+ * entrance meeting a residential street at twenty degrees is exactly that. Drawn by
+ * hand the distinction rarely comes up, because nobody draws a driveway at twenty
+ * degrees on purpose; imported, it is one junction in twenty.
+ */
+const GORE_MIN_SPEED = 55 / 3.6;
+const GORE_MIN_LANES = 2;
 /** Two endpoints meeting below this angle continue one road into the next. */
 export const LINK_ANGLE = (60 * Math.PI) / 180;
 
@@ -295,6 +307,35 @@ export function pairAngle(a: MeetingParticipant, b: MeetingParticipant): number 
  * The directions an arm leaves the meeting in: one for a stroke that ends here,
  * both for a stroke that passes through.
  */
+export /**
+ * Whether this pair is a road-and-ramp rather than two roads meeting at a corner.
+ *
+ * Either the joining road says it is a ramp, or the road being joined is big enough
+ * to need one. Anything else compiles as a crossing, which is what a shallow join
+ * between two small streets actually is.
+ */
+/**
+ * Whether the road runs the way a gore here would need it to.
+ *
+ * A one-way road can only be merged into from behind and diverged from in front. The
+ * data is full of one-way pairs whose ends meet the wrong one of the two, and the
+ * answer there is a junction rather than a gore.
+ */
+function roadTakes(
+  ramp: MeetingParticipant, road: MeetingParticipant, roadStroke: PreparedStroke, merging: boolean,
+): boolean {
+  const rampEnd = ramp.end === 1 ? 1 : -1;
+  const flow = merging ? (rampEnd === 1 ? 1 : -1) : (rampEnd === -1 ? 1 : -1);
+  const along = ramp.tx * flow * road.tx + ramp.ty * flow * road.ty >= 0;
+  return (along ? roadStroke.profile.lanesForward : roadStroke.profile.lanesBackward) > 0;
+}
+
+function goreWorthBuilding(road: PreparedStroke, ramp: PreparedStroke): boolean {
+  if (ramp.profile.isRamp) return true;
+  const lanes = Math.max(road.profile.lanesForward, road.profile.lanesBackward);
+  return road.profile.speedLimit >= GORE_MIN_SPEED || lanes >= GORE_MIN_LANES;
+}
+
 export function leaves(p: MeetingParticipant): [number, number][] {
   if (p.end === -1) return [[p.tx, p.ty]];
   if (p.end === 1) return [[-p.tx, -p.ty]];
@@ -441,16 +482,33 @@ export function findMeetings(
       continue;
     }
 
-    if ((aEnd || bEnd) && angle <= shallowLimit) {
+    if ((aEnd || bEnd) && angle <= shallowLimit && goreWorthBuilding(
+      strokes[participants[aEnd ? 1 : 0].strokeIdx], strokes[participants[aEnd ? 0 : 1].strokeIdx])) {
       const rampIdx = aEnd ? 0 : 1;
       const roadIdx = 1 - rampIdx;
       const ramp = participants[rampIdx];
       const rampStroke = strokes[ramp.strokeIdx];
+      const roadStroke = strokes[participants[roadIdx].strokeIdx];
       // `end === +1` means the ramp's forward traffic arrives here.
-      const feedsIn = ramp.end === 1 ? rampStroke.profile.lanesForward > 0
-                                     : rampStroke.profile.lanesBackward > 0;
-      const feedsOut = ramp.end === 1 ? rampStroke.profile.lanesBackward > 0
-                                      : rampStroke.profile.lanesForward > 0;
+      const feedsIn = (ramp.end === 1 ? rampStroke.profile.lanesForward > 0
+        : rampStroke.profile.lanesBackward > 0)
+        && roadTakes(participants[rampIdx], participants[roadIdx], roadStroke, true);
+      const feedsOut = (ramp.end === 1 ? rampStroke.profile.lanesBackward > 0
+        : rampStroke.profile.lanesForward > 0)
+        && roadTakes(participants[rampIdx], participants[roadIdx], roadStroke, false);
+      if (!feedsIn && !feedsOut) {
+        // The road does not run the way this ramp needs it to. Rather than refuse to
+        // connect — which leaves the ramp's lanes with nowhere to go, and traffic
+        // stopping dead at the end of them — build the plain junction the geometry
+        // actually describes. The movements that cannot exist simply do not get
+        // built, which is the ordinary allocation doing its job.
+        const radius = assignTrims(participants, strokes);
+        meetings.push({
+          kind: 'crossing', x: cluster.x, y: cluster.y, grade, radius,
+          participants, rampIdx: -1, roadIdx: -1,
+        });
+        continue;
+      }
       if (feedsIn) {
         meetings.push({
           kind: 'merge', x: cluster.x, y: cluster.y, grade, radius: 0,
@@ -461,13 +519,6 @@ export function findMeetings(
         meetings.push({
           kind: 'diverge', x: cluster.x, y: cluster.y, grade, radius: 0,
           participants: participants.map((p) => ({ ...p })), rampIdx, roadIdx,
-        });
-      }
-      if (!feedsIn && !feedsOut) {
-        diagnostics.push({
-          severity: 'warning', code: 'ramp-no-flow',
-          message: 'Ramp meets this road but carries no traffic in either direction.',
-          x: cluster.x, y: cluster.y, strokeId: rampStroke.stroke.id,
         });
       }
       continue;

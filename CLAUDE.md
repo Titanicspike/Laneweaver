@@ -132,6 +132,7 @@ src/
   core/
     geom/       # vec2, polyline ops, flattening, offsetting, arclength, polygon booleans, rbush
     geo/        # web mercator, for tracing over satellite imagery
+    osm/        # OpenStreetMap import: tags to road types, ways to strokes
     network/    # edit model types, compiler, lane graph helpers, validation
     sim/        # vehicle state (SoA), idm, mobil, merge, junctions, signals, router, spawner
     terrain/    # heightfield generation and build constraints
@@ -1405,6 +1406,99 @@ without them. Migrations live in `core/util/serialization.ts` and run in order; 
 profile went missing is repointed) and a file from a newer format is refused with a clear message
 rather than half-loaded. Never break old saves silently.
 
+## Importing OpenStreetMap
+
+A square of the real world, by coordinate: type a latitude and longitude into the
+toolbar, pick a size, and get a working network. Two miles square is what it is built
+for — Cupertino's two miles are 1,976 roads, and they download, import and compile in
+about nine seconds in Firefox.
+
+**The compiler already wants what OSM has.** A way *is* a centreline and a tag list is
+a cross-section, junctions are found geometrically, so the import supplies no
+junctions, no lanes and no connectors — it supplies strokes and profiles, and the rest
+of the pipeline runs unchanged. That is why this is a small module rather than a
+second compiler. `core/geo/mercator.ts` was already there for satellite tracing and
+does the lat/lon → metres with the 1/cos(latitude) distortion divided out at one
+anchor, so a two-mile square is two miles across in Reykjavík as well as in Lagos.
+
+**Fitting is what makes it a road rather than a polygon** (`core/geom/fit.ts`, the
+inverse of `flatten.ts`). A surveyed way is a vertex every few metres carrying the
+noise of however it was traced; kept as control points it is faceted at any zoom, the
+offsetter spends its time repairing cusps that exist only because two vertices
+disagree by a degree, and nobody can edit it. Douglas–Peucker to drop the vertices
+that say nothing, then Schneider's fit — least squares, Newton reparameterisation,
+split at the worst point — which comes out around 2.4 vertices per control point. Two
+rules are not negotiable: the **ends never move**, because a junction is found
+geometrically and an endpoint that drifts half a metre is a T-junction that silently
+stops being one; and the **handles are capped at 1.5 chords**, because the
+least-squares optimum for nearly-collinear data with nearly-parallel end tangents is
+unbounded. On the first city that imported it produced a handle 239 km long on a 40 m
+road, which became a junction connector 156 km long, and the compiler spent **five
+minutes** of a five-minute compile testing it for conflicts. One bad handle cost 137x.
+
+**Tags supply the exceptions; the class supplies everything else** (`core/osm/tags.ts`).
+`lanes` is missing from most residential streets on earth and `width` from nearly
+everything, but `highway` is always there and carries most of the information. So the
+road class gives the defaults and the tags override them, which is also what makes an
+import look coherent: a city drawn from eighty road types reads as a city, and one
+drawn from a thousand slightly different ones reads as noise. Four readings earned
+their place by being wrong first:
+
+- **A `motorway_link` is a ramp; every other `*_link` is a slip road.** A gore, an
+  acceleration lane and a taper belong on a motorway. A `primary_link` is the hundred
+  metres that cuts the corner at an ordinary junction, and asking the compiler for a
+  gore there was most of the errors in the first city.
+- **A gore needs a road worth one** (`goreWorthBuilding` in the compiler): a shallow
+  endpoint join is a merge only where the road is fast or wide enough to need an
+  acceleration lane. Drawn by hand nobody puts a driveway on a freeway at twenty
+  degrees; imported, a supermarket entrance meeting a residential street does exactly
+  that, and it was one junction in twenty.
+- **A gore whose road runs the wrong way is a junction, not an error.** One-way pairs
+  meet the wrong one of the two constantly. Refusing to connect left the ramp's lanes
+  with nowhere to go; building the plain crossing lets the allocation decide, and the
+  movements that cannot exist simply are not built.
+- **A roundabout is taken at roundabout speed** whatever the road it interrupts is
+  signed at. OSM carries the parent road's `maxspeed` round the circle, so Milton
+  Keynes' grid roundabouts arrive at 95 km/h — and a circulating carriageway at
+  ninety-five is a very fast bend that traffic queues on. Every collision in that city
+  was two cars on a roundabout connector; capping it at 35 km/h took 34 to 2.
+
+**Roundabouts** are `Stroke.roundabout`, set by the importer from `junction=roundabout`
+and carried onto the segment. A circulating approach's weight is multiplied by a
+thousand, which says the whole thing at once: entering traffic yields to it, and the
+arms are then nothing like comparable, so the junction keeps priority control instead
+of being handed signals or an all-way stop. Before that, 483 of Milton Keynes' 730
+roundabout junctions compiled as all-way stops and 277 circulating movements gave way
+to traffic entering — which is exactly backwards and deadlocks as soon as it fills.
+A roundabout drawn as **one closed way** is a road whose two ends are each other, and
+the compiler rightly refuses a movement that leaves by the road it came in on, so it
+never circulated: a third of Milton Keynes' are drawn that way. Closed ways are cut
+into arcs at the nodes they share with other ways — spaced by *metres*, because two
+entries four metres apart are one place on the ring and cutting at both makes a
+four-metre stroke with a junction at each end.
+
+**The two kinds of end.** A road the extract's boundary cut carries on in the real
+world, so traffic comes in and out of it; a road that ends in the middle of the square
+ends in the middle of the real world too. Told apart, the import marks the interior
+ones closed and sets the spawn mode to `gateways`, so the traffic enters where a
+city's traffic enters. Left undistinguished, two miles of suburb spawns from nine
+hundred places at once and gridlocks in five minutes at four thousand vehicles and
+nine kilometres an hour.
+
+**Where the data comes from.** Overpass, by coordinate from the toolbar, or an export
+dropped on the canvas — told from a saved document by what is inside it (`elements`
+against `strokes`) rather than by its name. The endpoints are a free service run by
+volunteers: they are tried in turn, and a 429 from one is not a reason to tell somebody
+their coordinates are wrong. Data is © OpenStreetMap contributors, ODbL.
+
+**What it is checked against.** `scratch/osmPlaces.ts` is eighteen places chosen to
+break different things — a suburban US grid, Manhattan's one-way grid, mediaeval
+London, the Étoile, Tokyo's stacked expressways, a city built on roundabouts, a
+four-level stack, both hemispheres, the equator, and 64°N where Mercator distortion is
+largest. `npx tsx scratch/osmfetch.ts` caches them; `npx tsx scratch/osmcheck.ts`
+imports, compiles, audits and drives every one; `scratch/osmcollide.ts` says where a
+city collides and what kind of junction it is.
+
 ## Terrain and underlays
 
 - **Image underlay** — drop any image, position it by hand, saved with the document. Zero
@@ -1494,7 +1588,7 @@ Roundabouts are the obvious next feature. None of it before merges are flawless.
 
 ## Testing strategy
 
-`npm test` runs 704 tests in about 130 s; the merge suite is most of that and is worth every
+`npm test` runs 727 tests in about 130 s; the merge suite is most of that and is worth every
 second. Two of them are red, both in `test/sim/committed-crossing.test.ts`, and they are the
 at-grade priority crossing under **Milestones** — not a flake and not something to re-run away.
 
@@ -1597,6 +1691,13 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   mention `process`, `document`, `window`, `Path2D` or anything else that exists in one environment
   and not the other. Blunt on purpose — the thing being defended is that core has no environment, and
   the only way to check that from inside one is to look at the source.
+- **OSM import** (`test/geom/fit.test.ts`, `test/osm/import.test.ts`): the fit keeps
+  its ends and its tolerance, splits at a corner rather than rounding it off, and
+  never returns a handle longer than its chord allows — the one that cost 137x on a
+  city compile. The importer reads the tags the way they are meant, cuts a closed way
+  into arcs, closes the ends inside the extract and leaves the boundary open, and
+  compiles a roundabout whose circulating traffic has priority and whose junctions are
+  never all-way stops.
 - **Perf smoke** (`npm run bench`): 5,000 vehicles on a synthetic 287 km-of-lane freeway network.
   Currently compile 72 ms, tick 4.8 ms median under Vitest and 2.8 ms under `tsx` (budget 6, see
   the harness note below), street-level frame 1.0 ms.
@@ -1795,6 +1896,28 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   actually sit near the junction against where the asphalt edge sits (`scratch/scenecheck.ts` on a
   bayed junction), and the four-way priority scenario, which starves if its side road is trimmed
   two metres too far.
+- **One runaway control point costs the whole compile.** A least-squares curve fit is
+  unbounded on degenerate input, and the compiler believes what it is given: a 239 km
+  handle became a 156 km junction connector, flattened to 39,169 points, and
+  `addConflicts` spent five minutes on it. Compile went 82 s → 0.6 s from capping the
+  handle. When a compile is inexplicably slow, look for one absurd piece of geometry
+  before looking for an algorithm.
+- **Every road end to every other is a square.** Portal demand was built pairwise, so
+  an imported city's 3,289 ends made 1.4 million pairs — each asked whether it was
+  reachable, each counted down every tick, nine milliseconds of a fourteen millisecond
+  tick spent on pairs that never fire. Each end now takes a bounded set of
+  destinations; the outflow is unchanged and a hand-drawn document is untouched,
+  because its whole square already fits under the cap.
+- **A driver placed behind a queue is not a following model failing.** Spawning
+  matched the speed of the car in front *on the spawn lane* — and in a city the queue
+  is usually on the next lane, a few metres past the junction. So drivers appeared at
+  a hundred kilometres an hour forty metres behind a stationary car. That was almost
+  every rear-end collision in an imported interchange: 70 → 18 from making the spawn
+  look across the boundary.
+- **A look-ahead bounded by lanes is not bounded by distance.** The leader search
+  stopped after four lanes, which is 260 m on a drawn document and *seventy-five
+  metres* on an imported city where a road is cut at every junction. The bound that
+  means anything is the distance a driver needs to stop.
 - **Two auxiliary lanes look symmetric and are not.** A stack from one ramp pairs off lane for lane;
   a stack from two *different* ramps overlapping is the case step 8 splits the road for. Fusion and
   outward stacking both have to compare like depth with like depth, or a two-lane on-ramp followed by

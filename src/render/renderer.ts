@@ -423,7 +423,16 @@ export class Renderer {
   private drawDiagnostics(net: Network): void {
     const { ctx, camera, theme } = this;
     const r = Math.max(1.5, 7 / camera.zoom);
-    for (const d of net.diagnostics) {
+    // Only what is on screen, and only the worst of it. An imported city carries
+    // hundreds of markers and drawing them all buries the thing they are marking:
+    // six hundred dots over a map is not six hundred pieces of information, it is a
+    // map you cannot see. Errors first, so the ones that matter are the ones kept.
+    const view = camera.visibleRect();
+    const visible = net.diagnostics.filter((d) => d.x !== undefined && d.y !== undefined
+      && d.x >= view.minX && d.x <= view.maxX && d.y >= view.minY && d.y <= view.maxY);
+    const order = { error: 0, warning: 1, info: 2 };
+    visible.sort((a, b) => order[a.severity] - order[b.severity]);
+    for (const d of visible.slice(0, MAX_DIAGNOSTIC_MARKS)) {
       if (d.x === undefined || d.y === undefined) continue;
       ctx.fillStyle = d.severity === 'error' ? theme.errorMark
         : d.severity === 'warning' ? theme.warnMark : theme.infoMark;
@@ -438,6 +447,9 @@ export class Renderer {
     }
   }
 }
+
+/** Markers drawn at once: past this they hide the map they are drawn on. */
+const MAX_DIAGNOSTIC_MARKS = 60;
 
 export function roundRect(
   ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number,

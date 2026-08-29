@@ -953,13 +953,50 @@ export function laneKeyOf(lane: Lane, segments: Segment[]): string {
 }
 
 /** Every crossing point between two connectors, recorded on both. */
-function addConflicts(a: Lane, b: Lane): void {
+/**
+ * A connector's bounding box, and one per polyline segment of it.
+ *
+ * Built once per connector and reused for every pair, because the pairs are the
+ * expensive part: a junction's connectors mostly do *not* cross each other — parallel
+ * movements, movements to opposite arms — and `addConflicts` returns as soon as it
+ * finds a crossing, so the pairs that cost the most are exactly the ones with nothing
+ * to find. On an imported city that was 304 seconds of a 306-second compile.
+ */
+interface ConnectorBounds {
+  minX: number; minY: number; maxX: number; maxY: number;
+  segMinX: Float32Array; segMinY: Float32Array;
+  segMaxX: Float32Array; segMaxY: Float32Array;
+}
+
+function boundsOfConnector(lane: Lane): ConnectorBounds {
+  const n = Math.max(0, (lane.centerline.length >> 1) - 1);
+  const segMinX = new Float32Array(n), segMinY = new Float32Array(n);
+  const segMaxX = new Float32Array(n), segMaxY = new Float32Array(n);
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const ax = lane.centerline[i * 2], ay = lane.centerline[i * 2 + 1];
+    const bx = lane.centerline[i * 2 + 2], by = lane.centerline[i * 2 + 3];
+    segMinX[i] = Math.min(ax, bx); segMaxX[i] = Math.max(ax, bx);
+    segMinY[i] = Math.min(ay, by); segMaxY[i] = Math.max(ay, by);
+    minX = Math.min(minX, segMinX[i]); maxX = Math.max(maxX, segMaxX[i]);
+    minY = Math.min(minY, segMinY[i]); maxY = Math.max(maxY, segMaxY[i]);
+  }
+  return { minX, minY, maxX, maxY, segMinX, segMinY, segMaxX, segMaxY };
+}
+
+function addConflicts(a: Lane, b: Lane, ba: ConnectorBounds, bb: ConnectorBounds): void {
+  // Nowhere near each other: nothing to test, and this is the common case.
+  if (ba.minX > bb.maxX || bb.minX > ba.maxX || ba.minY > bb.maxY || bb.minY > ba.maxY) return;
   const an = a.centerline.length >> 1;
   const bn = b.centerline.length >> 1;
   for (let i = 0; i < an - 1; i++) {
+    if (ba.segMinX[i] > bb.maxX || ba.segMaxX[i] < bb.minX
+      || ba.segMinY[i] > bb.maxY || ba.segMaxY[i] < bb.minY) continue;
     const ax = a.centerline[i * 2], ay = a.centerline[i * 2 + 1];
     const bx = a.centerline[i * 2 + 2], by = a.centerline[i * 2 + 3];
     for (let j = 0; j < bn - 1; j++) {
+      if (ba.segMinX[i] > bb.segMaxX[j] || ba.segMaxX[i] < bb.segMinX[j]
+        || ba.segMinY[i] > bb.segMaxY[j] || ba.segMaxY[i] < bb.segMinY[j]) continue;
       if (!segmentIntersect(
         ax, ay, bx, by,
         b.centerline[j * 2], b.centerline[j * 2 + 1],
@@ -1082,9 +1119,25 @@ function makeApproach(lanes: Lane[], segments: Segment[], segId: number, atEnd: 
     heading: approachHeading(seg, atEnd),
     incomingLanes: incoming.map((l) => l.id),
     outgoingLanes: outgoing.map((l) => l.id),
-    weight: Math.max(incoming.length, outgoing.length) * speed,
+    // Traffic already going round a roundabout has priority over everything trying
+    // to get on. Weight is what the compiler ranks approaches by, so saying it here
+    // says it once: the circulating arm outranks the entries, the entries yield to
+    // it, and — because the arms are then nothing like comparable — the junction
+    // keeps priority control rather than being handed signals or an all-way stop.
+    // A roundabout whose every entry is an all-way stop is not a roundabout, and
+    // one where the circulating traffic gives way deadlocks the moment it fills.
+    weight: Math.max(incoming.length, outgoing.length) * speed
+      * (seg.roundabout ? ROUNDABOUT_PRIORITY : 1),
   };
 }
+
+/**
+ * How much an approach outranks the others for being the circulating carriageway.
+ *
+ * Big enough that no combination of lanes and speed on an entering arm can outweigh
+ * it: an entry is always the one that gives way.
+ */
+const ROUNDABOUT_PRIORITY = 1000;
 
 export function buildJunctions(inputs: JunctionInputs): {
   junctions: Junction[];
@@ -1287,6 +1340,7 @@ export function buildJunctions(inputs: JunctionInputs): {
       }
     }
 
+    const bounds = connectorIds.map((id) => boundsOfConnector(lanes[id]));
     for (let i = 0; i < connectorIds.length; i++) {
       for (let j = i + 1; j < connectorIds.length; j++) {
         const a = lanes[connectorIds[i]];
@@ -1297,7 +1351,7 @@ export function buildJunctions(inputs: JunctionInputs): {
           b.conflicts.push({ other: a.id, sSelf: b.length, sOther: a.length, angle: 0 });
           continue;
         }
-        addConflicts(a, b);
+        addConflicts(a, b, bounds[i], bounds[j]);
       }
     }
     assignPriority(lanes, connectorIds, weightOf);
@@ -1314,11 +1368,15 @@ export function buildJunctions(inputs: JunctionInputs): {
     // priority control, because signalising them would meter traffic that was never
     // going to conflict much in the first place.
     const arterialScale = live.some((a) => a.incomingLanes.length >= 2);
-    const useSignal = !riro && approaches.length >= 3 && comparable && arterialScale;
+    // Nothing on a roundabout is signalised or made an all-way stop by the compiler.
+    // The document can still ask for signals — some big ones are metered — but that
+    // has to be a choice somebody made rather than the default.
+    const circulating = approaches.some((a) => segments[a.segmentId]?.roundabout);
+    const useSignal = !riro && !circulating && approaches.length >= 3 && comparable && arterialScale;
     // Comparable roads that are too small for signals get an all-way stop, which is
     // what these junctions have in the real world and the only control that shares
     // a small four-way fairly: a fixed priority order simply starves the last road.
-    const useAllWayStop = !riro && !useSignal && approaches.length >= 3 && comparable;
+    const useAllWayStop = !riro && !circulating && !useSignal && approaches.length >= 3 && comparable;
 
     const junction: Junction = {
       id: junctionId,

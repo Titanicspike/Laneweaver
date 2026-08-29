@@ -102,6 +102,35 @@ function gateways(net: Network, mode: SpawnMode): { origins: Portal[]; exits: Po
   };
 }
 
+/**
+ * Most origin-destination pairs a network may carry.
+ *
+ * Not a quality knob: the flow out of each end is the same either way. It bounds
+ * what a tick costs so that a city does not spend it counting down pairs that will
+ * never fire.
+ */
+const MAX_DEMAND_PAIRS = 40000;
+
+/**
+ * A bounded set of destinations for one origin, chosen the same way every time.
+ *
+ * Half the heaviest — a road end's through traffic mostly goes to the other big
+ * roads — and half strided evenly through the rest, so the small streets are not
+ * shut out entirely. Deterministic by construction: no rng, and the same list in the
+ * same order on every recompile.
+ */
+function chooseDestinations(exits: Portal[], fromId: number, limit: number): Portal[] {
+  const usable = exits.filter((to) => to.id !== fromId);
+  if (usable.length <= limit) return usable;
+  const byWeight = [...usable].sort((a, b) => b.weight - a.weight || a.id - b.id);
+  const half = Math.max(1, limit >> 1);
+  const chosen = byWeight.slice(0, half);
+  const rest = byWeight.slice(half);
+  const stride = Math.max(1, Math.floor(rest.length / Math.max(1, limit - half)));
+  for (let i = 0; i < rest.length && chosen.length < limit; i += stride) chosen.push(rest[i]);
+  return chosen;
+}
+
 export function buildDemand(
   net: Network,
   explicit: ReadonlyArray<DemandEntry>,
@@ -169,8 +198,21 @@ export function buildDemand(
     // Through traffic: every road end, weighted by road size, as in `portals`. In
     // the mixed mode it rides alongside the town's own trips.
     const { origins, exits } = gateways(net, mode === 'mixed' ? 'portals' : mode);
+    // Every end to every other end is a square, and an imported city has thousands
+    // of ends: Moscow's two square miles have 3,289, which is 1.4 million pairs, all
+    // of them asked whether they are reachable when the demand is built and all of
+    // them counted down every tick. That was nine milliseconds of a fourteen
+    // millisecond tick, spent almost entirely on pairs that never fire.
+    //
+    // So each end gets a bounded set of destinations instead: the biggest, which is
+    // where through traffic really goes, plus a spread of the rest so it is not only
+    // the biggest. The origin's total outflow is unchanged — the weights are
+    // normalised over whatever was chosen — and a network small enough for the whole
+    // square to fit under the cap is untouched, which is every hand-drawn document.
+    const perOrigin = Math.max(8, Math.floor(MAX_DEMAND_PAIRS / Math.max(1, origins.length)));
     for (const from of origins) {
-      const destinations = exits.filter((to) => to.id !== from.id && reachable(from.id, to.id));
+      const candidates = chooseDestinations(exits, from.id, perOrigin);
+      const destinations = candidates.filter((to) => reachable(from.id, to.id));
       if (!destinations.length) continue;
       const totalWeight = destinations.reduce((acc, d) => acc + d.weight, 0) || 1;
       const originFlow = laneFlow(net, from.entryLanes) * from.weight;

@@ -14,7 +14,28 @@ const grid = document.getElementById('grid')!;
 document.documentElement.style.setProperty('--h', `${tall}px`);
 if (params.get('wide')) grid.setAttribute('style', 'grid-template-columns: 1fr');
 
-for (const c of cases()) {
+/**
+ * An imported place, fetched from the cache the dev server happens to be serving.
+ * `?osm=cupertino` draws it exactly as the app would, which is the only way to see
+ * whether an import looks like a city or like a diagram.
+ */
+async function osmCase(id: string): Promise<Case | null> {
+  const res = await fetch(`/scratch/osm/${id}.json`);
+  if (!res.ok) return null;
+  const { importOsm } = await import('../src/core/osm/import');
+  const { model, report } = await Promise.resolve(importOsm(await res.json()));
+  console.log(`${id}: ${report.imported} ways, ${report.controlPoints} control points, ${report.ms} ms`);
+  return { name: `osm:${id}`, model, zoom: 0 };
+}
+
+const osmWanted = (params.get('osm') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+const extra: Case[] = [];
+for (const id of osmWanted) {
+  const c = await osmCase(id);
+  if (c) extra.push(c);
+}
+
+for (const c of [...extra, ...(osmWanted.length ? [] : cases())]) {
   if (only.length && !only.some((o) => c.name.includes(o))) continue;
   const net = compile(c.model);
   const fig = document.createElement('figure');
@@ -48,6 +69,6 @@ for (const c of cases()) {
   if (fx !== undefined) { renderer.camera.x = fx; renderer.camera.y = fy!; }
   renderer.render({
     network: net, paths, sim, alpha: 0, terrain: null, underlay: null, geo: null,
-    showGrid: false, showDiagnostics: true, overlays: [],
+    showGrid: false, showDiagnostics: params.get('diag') !== '0', overlays: [],
   });
 }

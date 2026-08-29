@@ -843,6 +843,7 @@ export function buildSegments(
       isRamp: profile.isRamp,
       verge: Math.max(0, profile.verge ?? 0),
       landUse: segLandUse,
+      roundabout: stroke.stroke.roundabout === true,
       frontages: segLandUse ? frontagesOf(length, segLandUse, segId, headsFor(range)) : [],
       capStart,
       capEnd,

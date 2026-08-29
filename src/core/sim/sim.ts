@@ -104,6 +104,14 @@ const _gapOut = { dv: 0 };
 const ARRIVE_MIN = 12;
 
 /**
+ * Most lanes the leader search will cross before giving up.
+ *
+ * Only a backstop against a cycle of very short lanes: the real bound is the 260 m
+ * it is looking within, which is what a driver can see and what they need to stop.
+ */
+const LEADER_HOPS = 16;
+
+/**
  * Whether traffic on `lane` can use this address.
  *
  * Every ordinary frontage is served by both directions: you park at your own house
@@ -723,6 +731,31 @@ export class Simulation {
   }
 
   /** Creates one vehicle on `laneId` at `s`, behind `ahead`. */
+  /**
+   * The first vehicle downstream of a point, across lane boundaries.
+   *
+   * Used when placing a new one: `findAhead` only sees the lane it is asked about,
+   * and in a city that lane is often a few metres of road with the whole queue on
+   * the far side of the junction.
+   */
+  private leaderDownstream(laneId: number, at: number): { gap: number; speed: number } {
+    const store = this.store;
+    const lanes = this.net.lanes;
+    let dist = lanes[laneId].length - at;
+    let lane = laneId;
+    for (let hop = 0; hop < LEADER_HOPS && dist < 260; hop++) {
+      const next = lanes[lane].successors[0];
+      if (next === undefined) break;
+      const tail = store.laneLast[next];
+      if (tail >= 0) {
+        return { gap: dist + store.s[tail] - store.len[tail], speed: store.v[tail] };
+      }
+      dist += lanes[next].length;
+      lane = next;
+    }
+    return { gap: Infinity, speed: 0 };
+  }
+
   private place(
     pair: DemandPair, laneId: number, at: number, klass: number,
     spec: (typeof VEHICLE_CLASSES)[number], ahead: number,
@@ -749,7 +782,25 @@ export class Simulation {
     const desired = lane.speedLimit * store.v0Factor[i];
     // Matching the car in front matters more than starting at the limit: arriving
     // at speed behind a stationary queue is a collision the first tick has to undo.
-    store.v[i] = ahead >= 0 ? Math.min(desired, store.v[ahead]) : desired;
+    //
+    // And the car in front is not always on this lane. A road end in a city is
+    // metres from the junction it feeds, so the queue a new arrival has to join is
+    // usually on the *next* lane — and spawning at the limit behind it is a driver
+    // appearing at a hundred kilometres an hour forty metres from a stationary car,
+    // which is not a following model failing, it is a car being put there. On an
+    // imported freeway interchange that was almost every rear-end collision.
+    let cap = desired;
+    if (ahead >= 0) {
+      cap = Math.min(cap, store.v[ahead]);
+    } else {
+      const seen = this.leaderDownstream(laneId, at);
+      if (seen.gap < Infinity) {
+        // Fast enough to stop comfortably behind whatever is there.
+        const room = Math.max(0, seen.gap - IDM.s0);
+        cap = Math.min(cap, Math.sqrt(seen.speed * seen.speed + 2 * IDM.b * room));
+      }
+    }
+    store.v[i] = Math.max(0, cap);
     // Stagger the first evaluation so the whole fleet does not think at once.
     store.lcTimer[i] = (store.serial[i] % 9) * this.dt;
     store.a[i] = 0;
@@ -1233,7 +1284,15 @@ export class Simulation {
     out.dv = 0;
     let dist = lanes[store.lane[i]].length - store.s[i];
     let edge = this.nextEdge[i];
-    for (let hop = 0; hop < 4 && edge >= 0 && dist < 260; hop++) {
+    // Look until the *distance* runs out, not until a fixed number of lanes has.
+    // How many lanes 260 m is depends entirely on the network: on a drawn document
+    // it is one or two, and on an imported city — where a road is cut at every one
+    // of its junctions — it is a dozen 17 m segments and 21 m connectors. Stopping
+    // after four of those is a look-ahead of seventy-five metres on a road where
+    // stopping takes two hundred, and the queue at the end of it is invisible until
+    // the driver is in it. That was most of the collisions in an imported freeway
+    // interchange, all of them rear-end, all of them braking at the cap.
+    for (let hop = 0; hop < LEADER_HOPS && edge >= 0 && dist < 260; hop++) {
       const tail = store.laneLast[edge];
       if (tail >= 0) {
         out.dv = store.v[i] - store.v[tail];

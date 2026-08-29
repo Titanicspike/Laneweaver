@@ -106,6 +106,15 @@ export interface Stroke {
   profileId: Id;
   /** Zoning painted on this road, overriding the profile's. See `ZoneChoice`. */
   landUse?: ZoneChoice;
+  /**
+   * A circulating carriageway: traffic already on it has priority over everything
+   * entering, and the junctions round it are never signalised or all-way stops.
+   *
+   * A property of the road rather than of its type, because a roundabout is one
+   * particular ring of tarmac and not a kind of road — the same profile builds the
+   * arms that feed it.
+   */
+  roundabout?: boolean;
   points: ControlPoint[];
   name?: string;
 }
@@ -564,6 +573,8 @@ export interface RoadSymbol {
 export interface Segment {
   id: Id;
   strokeId: Id;
+  /** This segment is part of a circulating carriageway. See `Stroke.roundabout`. */
+  roundabout: boolean;
   profileId: Id;
   grade: Grade;
   /** Range of the parent stroke covered by this segment. */

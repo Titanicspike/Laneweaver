@@ -88,6 +88,7 @@ export function toSaveFile(model: EditModel): SaveFile {
       profileId: s.profileId,
       name: s.name,
       ...(s.landUse ? { landUse: s.landUse } : {}),
+      ...(s.roundabout ? { roundabout: true } : {}),
       // Control points go out as flat arrays: seven numbers each instead of seven
       // keys. The level goes on the point, so one road can rise and fall.
       points: s.points.map((p) => [p.x, p.y, p.hix, p.hiy, p.hox, p.hoy, p.grade]),
@@ -260,6 +261,9 @@ function readStroke(raw: unknown, validProfiles: Set<number>, fallbackProfile: n
     landUse: o.landUse === 'residential' || o.landUse === 'commercial' || o.landUse === 'none'
       ? (o.landUse as ZoneChoice)
       : undefined,
+    // A circulating carriageway. Absent in an older file, which is what every road
+    // drawn before roundabouts existed is.
+    roundabout: o.roundabout === true ? true : undefined,
     points,
   };
 }

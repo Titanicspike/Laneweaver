@@ -25,6 +25,7 @@ import { ZoneTool } from '../editor/tools/zoneTool';
 import type { PointerInfo, Tool, ToolEnv } from '../editor/tool';
 import { cloneProfile, createDocument, issueId } from '../core/network/model';
 import type { RoadProfile } from '../core/network/types';
+import { fetchAndImport, importFromText, looksLikeOsm } from './osmImport';
 import {
   addProfile as addProfileCommand, removeProfile, replaceDocument, setStrokeProfile,
   setUnderlay, updateGeo, updateProfile, updateSettings, updateTerrain,
@@ -161,6 +162,53 @@ export class App implements AppApi {
     this.afterDocumentSwap();
     this.ui.setStatus(`${example.name} — ${example.about}.`);
   }
+
+  /**
+   * Imports a square of the real world, centred on a coordinate.
+   *
+   * Goes in through `replaceDocument` like every other document swap, so it is one
+   * undo step and the map you had is one Ctrl+Z away — which matters more here than
+   * anywhere else, because the import is the one action that can take half a minute
+   * and replace everything.
+   */
+  async importOsmAt(lat: number, lon: number, miles: number): Promise<void> {
+    if (this.osmBusy) return;
+    this.osmBusy = true;
+    try {
+      const { model, report } = await fetchAndImport({
+        lat, lon, miles,
+        onProgress: (message) => this.ui.setStatus(message),
+      });
+      this.store.run(replaceDocument(model));
+      this.store.selection.clear();
+      this.afterDocumentSwap();
+      this.ui.setStatus(
+        `Imported ${report.imported} roads (${report.strokes} strokes, ${report.profiles} road types)`
+        + ` in ${(report.ms / 1000).toFixed(1)} s.`
+        + (report.roundabouts ? ` ${report.roundabouts} roundabouts.` : ''));
+    } catch (err) {
+      this.ui.setStatus((err as Error).message);
+    } finally {
+      this.osmBusy = false;
+      this.ui.refresh();
+    }
+  }
+
+  /** Imports map data somebody dropped on the canvas or picked from disk. */
+  async importOsmFile(file: File): Promise<void> {
+    try {
+      const { model, report } = importFromText(await file.text());
+      this.store.run(replaceDocument(model));
+      this.store.selection.clear();
+      this.afterDocumentSwap();
+      this.ui.setStatus(`Imported ${report.imported} roads from ${file.name}.`);
+    } catch (err) {
+      this.ui.setStatus((err as Error).message);
+    }
+    this.ui.refresh();
+  }
+
+  private osmBusy = false;
 
   private afterDocumentSwap(): void {
     this.activeProfileId = this.store.model.profiles[0].id;
@@ -484,8 +532,15 @@ export class App implements AppApi {
       event.preventDefault();
       const file = event.dataTransfer?.files?.[0];
       if (!file) return;
-      if (file.type.startsWith('image/')) this.acceptImage(file);
-      else if (file.name.endsWith('.json')) this.load(file);
+      if (file.type.startsWith('image/')) { this.acceptImage(file); return; }
+      if (!looksLikeOsm(file)) return;
+      // A dropped `.json` is either one of ours or an Overpass export, and the two
+      // are told apart by what is in them rather than by what they are called: a
+      // saved document has `strokes`, an export has `elements`.
+      void file.text().then((text) => {
+        if (/"elements"\s*:/.test(text.slice(0, 4096))) void this.importOsmFile(file);
+        else this.load(file);
+      });
     });
   }
 

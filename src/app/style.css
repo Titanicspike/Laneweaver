@@ -60,6 +60,10 @@ html, body, #app {
 
 #toolbar { top: 12px; left: 12px; width: 188px; }
 #palette { top: 12px; left: 212px; width: 282px; max-height: calc(100% - 24px); overflow: auto; }
+/* An import brings its road types with it, and a city has scores of them. The list
+   scrolls rather than growing past the window — and it is the panel's own body that
+   scrolls, so the heading stays put and you can still see what you are looking at. */
+#palette .body { max-height: calc(100vh - 120px); overflow-y: auto; }
 #builder { top: 12px; left: 212px; width: 282px; max-height: calc(100% - 24px); overflow: auto; display: none; }
 #underlay { top: 12px; right: 12px; width: 268px; }
 #signals { top: 12px; left: 212px; width: 276px; max-height: calc(100% - 216px); overflow: auto; }
