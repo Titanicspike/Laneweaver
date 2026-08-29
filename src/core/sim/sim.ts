@@ -14,7 +14,7 @@ import { clamp } from '../geom/vec2';
 import { laneSToParent, mapS, parentToLaneS } from '../network/laneGraph';
 import { samplePosition, sampleSmoothTangent } from '../geom/polyline';
 import {
-  LaneKind, type EditModel, type Lane, type Network, type SpawnMode,
+  LaneKind, type EditModel, type Frontage, type Lane, type Network, type SpawnMode,
 } from '../network/types';
 import { Mulberry32, jitter, mixSeed, expUnit } from '../util/rng';
 import { idmAccel, type IdmParams } from './idm';
@@ -102,6 +102,20 @@ const _gapOut = { dv: 0 };
  * gave and just as obviously wrong.
  */
 const ARRIVE_MIN = 12;
+
+/**
+ * Whether traffic on `lane` can use this address.
+ *
+ * Every ordinary frontage is served by both directions: you park at your own house
+ * whichever way you came down the street. A house on a turning head is not — its
+ * driveway opens onto the circle, so a driver reaches it by going round, which puts
+ * them on the lane leaving the head by the time they stop. That is what makes a
+ * cul-de-sac's traffic turn round in it rather than stopping short of the bulb and
+ * leaving the turning head as scenery.
+ */
+function servedBy(f: Frontage, lane: Lane): boolean {
+  return !f.head || f.head.fromSide === lane.side;
+}
 
 /**
  * How much room a driver wants before starting to slow for a lower limit ahead, as a
@@ -479,12 +493,14 @@ export class Simulation {
     const seed = mixSeed(this.store.seed[i], laneId);
     let usable = 0;
     for (const f of list) {
+      if (!servedBy(f, lane)) continue;
       const at = parentToLaneS(lane, f.s);
       if (at >= ARRIVE_MIN && at <= lane.length - 1) usable++;
     }
     if (usable > 0) {
       let wanted = seed % usable;
       for (const f of list) {
+        if (!servedBy(f, lane)) continue;
         const at = parentToLaneS(lane, f.s);
         if (at < ARRIVE_MIN || at > lane.length - 1) continue;
         if (wanted-- === 0) return at;
@@ -688,12 +704,14 @@ export class Simulation {
       // addresses rather than over arc-length.
       let usable = 0;
       for (const f of list) {
+        if (!servedBy(f, lane)) continue;
         const at = parentToLaneS(lane, f.s);
         if (at >= margin && at <= lane.length - margin) usable++;
       }
       if (usable > 0) {
         let wanted = Math.min(usable - 1, Math.floor(pick * usable));
         for (const f of list) {
+          if (!servedBy(f, lane)) continue;
           const at = parentToLaneS(lane, f.s);
           if (at < margin || at > lane.length - margin) continue;
           if (wanted-- === 0) return at;

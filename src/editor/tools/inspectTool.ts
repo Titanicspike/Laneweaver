@@ -21,7 +21,6 @@ import { samplePosition } from '../../core/geom/polyline';
 import {
   LaneKind, TurnKind,
   type GatewayRole, type Junction, type JunctionControl, type Lane, type Network,
-  type Portal,
 } from '../../core/network/types';
 
 const _p = { x: 0, y: 0 };
@@ -60,6 +59,7 @@ const GATEWAY_LABEL: Record<GatewayRole, string> = {
   entry: 'traffic in only',
   exit: 'traffic out only',
   off: 'closed to traffic',
+  culdesac: 'a cul-de-sac, with a turning head',
 };
 
 const LABELS: Record<JunctionControl, string> = {
@@ -259,7 +259,11 @@ export class InspectTool implements Tool {
       return;
     }
     const junction = this.pick(p, env, false);
-    if (!junction) {
+    // A turning head is a junction to the compiler and an *end of the road* to the
+    // person clicking it: one movement, no control to choose and no phases to edit.
+    // So it belongs to the end cycle rather than to the panel — and being picked as
+    // a junction first is what made a cul-de-sac impossible to turn back off.
+    if (!junction || junction.kind === 'culdesac') {
       // Nothing here, but there may be an end of the network: those are what the
       // gateway spawn mode is about, and there is nowhere else to click them.
       if (this.cycleGateway(p, env)) return;
@@ -301,10 +305,25 @@ export class InspectTool implements Tool {
     ctx: CanvasRenderingContext2D, camera: Camera, theme: Theme, env: ToolEnv,
   ): void {
     const net = env.store.network;
-    if (!net.portals.length) return;
+    const heads = net.junctions.filter((j) => j.kind === 'culdesac');
+    if (!net.portals.length && !heads.length) return;
     const r = Math.max(2.4, 9 / camera.zoom);
     ctx.lineWidth = lineWidth(0.3, camera.zoom);
     ctx.lineCap = 'round';
+    // A turning head is an end of the road that is no longer an end of the network,
+    // so it has no portal to draw. It still has to be visible, or the one state you
+    // cannot see is the one you need to click to undo.
+    ctx.globalAlpha = 0.75;
+    ctx.strokeStyle = theme.portal;
+    for (const head of heads) {
+      ctx.beginPath();
+      ctx.arc(head.x, head.y, r, 0, Math.PI * 2);
+      ctx.stroke();
+      // A loop back on itself: the movement this end offers, and the only one.
+      ctx.beginPath();
+      ctx.arc(head.x, head.y, r * 1.9, Math.PI * 0.15, Math.PI * 1.85);
+      ctx.stroke();
+    }
     for (const portal of net.portals) {
       // Which way is *into* the network, from the lane this end carries.
       const lane = net.lanes[portal.entryLanes[0] ?? portal.exitLanes[0] ?? -1];
@@ -364,16 +383,25 @@ export class InspectTool implements Tool {
    * discovering the control only after you already needed it.
    */
   private cycleGateway(p: PointerInfo, env: ToolEnv): boolean {
-    let best: Portal | null = null;
+    let best: { x: number; y: number; role: GatewayRole } | null = null;
     let bestD = Infinity;
-    for (const portal of env.store.network.portals) {
-      const d = Math.hypot(portal.x - p.worldX, portal.y - p.worldY);
+    // A turning head is no longer a portal — that is the whole point of it — so the
+    // ends on offer are the portals *and* the heads. Without the second list the
+    // control is one-way: you could make a cul-de-sac and never unmake it.
+    const ends: { x: number; y: number; role: GatewayRole }[] = [
+      ...env.store.network.portals,
+      ...env.store.network.junctions
+        .filter((j) => j.kind === 'culdesac')
+        .map((j) => ({ x: j.x, y: j.y, role: 'culdesac' as GatewayRole })),
+    ];
+    for (const end of ends) {
+      const d = Math.hypot(end.x - p.worldX, end.y - p.worldY);
       if (d > env.scale * 18 || d >= bestD) continue;
       bestD = d;
-      best = portal;
+      best = end;
     }
     if (!best) return false;
-    const order: GatewayRole[] = ['both', 'entry', 'exit', 'off'];
+    const order: GatewayRole[] = ['both', 'entry', 'exit', 'off', 'culdesac'];
     const next = order[(order.indexOf(best.role) + 1) % order.length]!;
     env.store.run(setGatewayRole(best.x, best.y, next));
     env.setStatus(`Road end: ${GATEWAY_LABEL[next]}.`);

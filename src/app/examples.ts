@@ -430,6 +430,13 @@ function town(): EditModel {
     add(m, k.street, line(x0 + 290, y0, x0 + 290, y0 + BLOCK));
     add(m, k.street, line(x0, y0 + 220, x0 + BLOCK, y0 + 220));
   }
+  // Two cul-de-sacs off the collectors: a street that stops, with a turning head on
+  // the end and its houses round the bulb. Traffic drives up, goes round and comes
+  // back out, which is the one thing a dead end cannot do.
+  for (const [x, y, len] of [[-BLOCK, BLOCK + 60, 260], [BLOCK * 2, -BLOCK - 40, -240]] as const) {
+    add(m, k.street, line(x, y, x + len, y));
+    m.gateways.push({ x: x + len, y, role: 'culdesac' });
+  }
   // A high street through the middle, so the land-use mode has somewhere to send
   // everybody. An L of it rather than a single road: every trip in the town ending
   // on the same hundred metres would queue there whatever the rest of the network

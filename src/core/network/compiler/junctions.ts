@@ -97,6 +97,7 @@ function lanesAt(lanes: Lane[], seg: Segment, atEnd: boolean): { incoming: Lane[
 /** Builds a smooth connector lane between two lane ends. */
 export function buildConnector(
   lanes: Lane[], junctionId: number, from: Lane, to: Lane, turn: TurnKind,
+  handle?: number,
 ): Lane {
   samplePosition(from.centerline, from.arclength, from.length, _p0);
   sampleTangent(from.centerline, from.arclength, Math.max(0, from.length - 0.01), _t0);
@@ -104,7 +105,11 @@ export function buildConnector(
   sampleTangent(to.centerline, to.arclength, 0.01, _t1);
 
   const d = Math.hypot(_p1.x - _p0.x, _p1.y - _p0.y);
-  const h = Math.min(60, Math.max(0.75, d * 0.42));
+  // Straight-line distance is the right handle for a movement that goes *across* a
+  // junction. A U-turn's two ends are a lane apart and its tangents are opposed, so
+  // that rule gives a two-metre hairpin pivoting on the stop line; a turning head
+  // passes its own radius in instead.
+  const h = handle ?? Math.min(60, Math.max(0.75, d * 0.42));
   const pts: number[] = [_p0.x, _p0.y];
   flattenCubicInto(
     pts,

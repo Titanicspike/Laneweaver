@@ -344,7 +344,7 @@ export function fromSaveFile(raw: unknown): EditModel {
     : [];
 
   // Which ends of the network let traffic in and out, for the gateway spawn mode.
-  const roles = new Set(['both', 'entry', 'exit', 'off']);
+  const roles = new Set(['both', 'entry', 'exit', 'off', 'culdesac']);
   const gateways = Array.isArray(doc.gateways)
     ? (doc.gateways as Record<string, unknown>[])
         .filter((g) => typeof g.role === 'string' && roles.has(g.role))

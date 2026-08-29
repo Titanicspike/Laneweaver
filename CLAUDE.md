@@ -273,6 +273,57 @@ there: the zones the router uses, and the buildings the renderer draws. Reading 
 shipped once — a painted street grew houses and generated no traffic at all, which a
 six-by-six stress town found by compiling 2,375 plots and zero zones.
 
+### Cul-de-sacs
+
+A street that stops can be a **turning head**: a bulb of asphalt at the end, a U-turn from the lane
+coming in to the lane going out, and the houses standing round the circle instead of along a street.
+
+**It is asked for, never assumed.** Every road that stops is a *portal* — where trips begin and end —
+so turning every dead end into a head would take the traffic out of half the scenarios in the suite
+and out of whatever the user had already drawn. It is the fifth value on the same position-keyed
+override that already says what each end of the network lets traffic do (`GatewayRole` gains
+`'culdesac'`), because to the person clicking the end it is the same question asked once: what
+happens here. The junction tool cycles both ways → in only → out only → closed → cul-de-sac.
+
+**The U-turn is the load-bearing part.** It is what makes the end stop being a portal, and it does so
+without anything having to say it: the portal rule is "a lane with somewhere to go is not an exit",
+and now it has somewhere. It is also what makes the head a place rather than a wall — a driver can
+reach a house at the end and get out again. A one-way street has nothing to turn into, so it is
+refused with a diagnostic rather than built into a road nobody can leave.
+
+**The road is cut back by the bulb's radius**, which is the same shape of cut a ramp makes and goes
+in the same list. Draw a hundred metres of street and get ninety metres of street with a turning head
+on the end, rather than a hundred and ten metres of road: the whole thing lands inside the stroke that
+was drawn. The radius comes from the road's own width, floored at 9 m — what a car can actually turn
+in, and what real residential heads are built to.
+
+**The loop is sized from the kerb it has to clear, not from a fraction of the radius.** A cubic's
+apex sits at exactly three quarters of its handle (both control points are pushed the same distance
+in along the road, so the curve runs 3h·u(1−u) up that axis), and the mouth is one radius from the
+centre — so there are two radii of depth to spend, and the handle is whatever puts the apex a car's
+width short of the far kerb. Guessed as a ratio instead it is either a hairpin down the middle of a
+circle three times wider than it needs, which nothing longer than a car could use, or — half a step
+further — a path two metres outside the asphalt.
+
+**A head's houses are reached from the way out, and that is what makes the traffic turn round.** The
+driveways open onto the turning circle, so a driver goes round it to reach one and is on the lane
+leaving the head by the time they stop (`HeadPlot.fromSide`, checked by the traffic model against the
+lane's own side). Without that the U-turn was scenery: a driver bound for the street parked at the
+first address they passed on the way in, and nothing ever drove the connector — the same trap as an
+escape hatch no state can reach. Ordinary frontages are still served by both directions, because you
+park at your own house whichever way you came down the street.
+
+**The ring is sized where the houses stand, not at the kerb.** A plot on the outside of a circle is a
+wedge, so counting by its kerb width gives three vast gardens on a bulb that in reality holds five or
+six houses. `Frontage.head` carries the bulb and the angle; the renderer takes the plot's frame from
+the circle rather than from the segment centreline, and everything downstream — the trapezium of
+ground, the probe for depth, the building laid square to the road — works unchanged.
+
+**To the person clicking it, a head is an end of the road rather than a junction.** One movement, no
+control to choose, no phases to edit — so the click cycles the end instead of opening the panel, and
+the overlay draws it even though it is no longer a portal. Being picked as a junction first is what
+made a cul-de-sac impossible to turn back off.
+
 ### Time of day
 
 `settings.dayLength` compresses a day into that many simulated seconds (0 switches the
@@ -334,7 +385,7 @@ cross-section on a neighbour. The merge model leans on this constantly — it is
 ramp compare itself against traffic on the mainline with no geometric projection at run time.
 
 ```ts
-type JunctionKind = "crossing" | "merge" | "diverge" | "link";
+type JunctionKind = "crossing" | "merge" | "diverge" | "link" | "culdesac";
 
 // Paint that is a picture rather than a line, emitted per segment by the compiler.
 interface RoadSymbol {
@@ -348,6 +399,9 @@ interface RoadSymbol {
 `link` is a junction kind the original sketch did not have: two roads meeting end to end at a shallow
 angle. It has no footprint and no connectors — lane successors wire up directly — and it is where
 lane drops happen (below).
+
+`culdesac` is the turning head at the closed end of a street: a bulb, and one U-turn connector inside
+it. See **Cul-de-sacs** below.
 
 Vehicle state lives in SoA typed arrays keyed by a dense slot: `lane, s, v, a, urgency, gapLead,
 gapLag, cooperateWith, ...`. `s` is the **front bumper** position, so the gap to a leader is
@@ -1268,8 +1322,10 @@ markings → signals) → vehicles (per grade) → editor overlays.
   "all of it". The road type still supplies the default, so drawing with a residential profile still
   zones as you go.
 - **Marking the ends of the network.** Clicking an end with the junction tool cycles what it lets
-  traffic do — both ways, in only, out only, closed — and the overlay draws each one as an arrow
-  rather than a ring, because the whole choice is directional. Available whatever the spawn mode is:
+  traffic do — both ways, in only, out only, closed, **cul-de-sac** — and the overlay draws each one
+  as an arrow rather than a ring, because the whole choice is directional. The last one is not about
+  demand at all: it builds a turning head (see **Cul-de-sacs**), which stops being a portal, so the
+  overlay draws it as a loop and the click that made it is the click that undoes it. Available whatever the spawn mode is:
   refusing the click outside the gateway mode would mean discovering the control only after you
   already needed it. An end nobody has marked stays `both`, so switching to the gateway mode is a
   starting point rather than a cliff.
@@ -1297,7 +1353,9 @@ sitting on all-red.
 
 Control points are written as flat seven-number arrays rather than objects, which roughly halves the
 file: position, both handles, and the level the point sits at. Version 2 moved that level off the
-stroke and onto its points; the migration copies the stroke's level onto every one of them. Version 3
+stroke and onto its points; the migration copies the stroke's level onto every one of them. A gateway role of `culdesac` is what makes an end a turning head; older code
+refuses a file carrying one rather than opening it as a plain dead end, which is the point of the
+version gate. Version 3
 added land use on profiles, a spawn mode on settings and gateway roles — all optional with defaults
 that are the old behaviour, so its migration rewrites nothing. It exists to record that the format
 grew, and so that a v3 file carrying gateways is *refused* by older code rather than half-loaded
@@ -1395,7 +1453,7 @@ Roundabouts are the obvious next feature. None of it before merges are flawless.
 
 ## Testing strategy
 
-`npm test` runs 681 tests in about 130 s; the merge suite is most of that and is worth every
+`npm test` runs 693 tests in about 130 s; the merge suite is most of that and is worth every
 second. Two of them are red, both in `test/sim/committed-crossing.test.ts`, and they are the
 at-grade priority crossing under **Milestones** — not a flake and not something to re-run away.
 
@@ -1478,6 +1536,11 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   3.4 m/s across a 10 m connector takes 3 s against a 1.7 s clearance, and the control run then
   reads one turn on red that never happened. `npx tsx scratch/signalcheck.ts [case] [minutes] [demand]` prints the same numbers the
   assertions are built from.
+- **Cul-de-sacs** (`test/network/culdesac.test.ts`, `test/sim/culdesac.test.ts`): built only where
+  the document asks, no portal left at the end, the bulb inside the road that was drawn, the U-turn
+  on the tarmac and past the centre of the circle, the ring of houses clear of the mouth and served
+  from the lane leaving the head — and, in the sim, that traffic really does drive round it, that
+  nobody is lost in there, and that through traffic never enters one at all.
 - **Application** (`test/app/`): the demo document compiles clean and runs clean; a full
   edit-run-render cycle through every tool stays consistent; and the whole editor boots under jsdom
   with a stub canvas, so drawing a road with the pointer, panning, the road builder, the terrain
@@ -1571,6 +1634,11 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   crosses *over*. Anything outside the compiler that reduces a stroke to one level (the editor's
   snapping did, from its first control point) disagrees with what gets built, and the disagreement
   shows up as an editor that will not let you draw the thing the compiler would happily compile.
+- **A movement nothing drives is scenery.** The cul-de-sac's U-turn compiled, rendered and was never
+  once used: a driver bound for a house on the street parked at the first address they passed on the
+  way in, so the turning head was decoration and the feature looked finished from every angle except
+  a running simulation. Whenever something is added for traffic to *do*, count how often traffic
+  actually does it before believing it works — `test/sim/culdesac.test.ts` exists for that reason.
 - **A portal is where the network stops, not where no junction was recorded.** A plain split (step 8)
   wires its lanes straight across without a junction id, so reading "no junction at this end" as "the
   road ends here" drops an entry *and* an exit portal into the middle of a running carriageway.

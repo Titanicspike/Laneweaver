@@ -9,6 +9,8 @@
 import { buildArclength, densify, polylineLength, sampleTangent, subPolyline } from '../../geom/polyline';
 import { offsetPolyline, offsetPolylineVariable } from '../../geom/offset';
 import { frontagesOf } from '../frontage';
+import type { TurningHead } from '../frontage';
+import { headAt, headFrontageOf, type CulDeSacPlan } from './culdesac';
 import { profileHalfWidth } from '../model';
 import { groupSign, halfCarriageway, layoutProfile, lanesOnSide } from './layout';
 import type { Diagnostic, Lane, Marking, Segment } from '../types';
@@ -326,11 +328,21 @@ export function buildSegments(
   turnLanes: TurnLanePlan[],
   driveOnRight: boolean,
   lanes: Lane[],
+  culDeSacs: ReadonlyArray<CulDeSacPlan> = [],
 ): BuiltSegments {
   const diagnostics: Diagnostic[] = [];
   const segments: Segment[] = [];
   const built: SegmentRange[] = [];
   const auxLaneByPlan = new Map<number, number>();
+  /** The turning heads on one segment, for the frontage walk to ring. */
+  const headsFor = (range: SegmentRange): TurningHead[] => {
+    const out: TurningHead[] = [];
+    for (const atEnd of [false, true]) {
+      const plan = headAt(culDeSacs, range, atEnd);
+      if (plan) out.push(headFrontageOf(plan, strokes[range.strokeIdx].halfWidth));
+    }
+    return out;
+  };
 
   for (let rangeIdx = 0; rangeIdx < ranges.length; rangeIdx++) {
     const range = ranges[rangeIdx];
@@ -831,7 +843,7 @@ export function buildSegments(
       isRamp: profile.isRamp,
       verge: Math.max(0, profile.verge ?? 0),
       landUse: segLandUse,
-      frontages: segLandUse ? frontagesOf(length, segLandUse, segId) : [],
+      frontages: segLandUse ? frontagesOf(length, segLandUse, segId, headsFor(range)) : [],
       capStart,
       capEnd,
       symbols: [],

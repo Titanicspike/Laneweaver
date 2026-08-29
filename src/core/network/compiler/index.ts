@@ -16,6 +16,7 @@ import { auxSplitPoints, planAuxLanes, planRamps } from './ramps';
 import { planLinks } from './links';
 import { planTurnLanes } from './turnLanes';
 import { buildSegments, gradeSplitPoints, planSegmentRanges } from './segments';
+import { buildCulDeSacs, planCulDeSacs } from './culdesac';
 import { buildJunctions, paintApproaches } from './junctions';
 import { buildSignalPlan, validateSignalPlan } from './signals';
 import { validateNetwork } from './validate';
@@ -224,11 +225,19 @@ export function compile(model: EditModel): Network {
   const { links, transitions, diagnostics: linkDiags } = planLinks(strokes, meetings, driveOnRight);
   diagnostics.push(...linkDiags);
 
-  const rampCuts = rampPlans.map((p) => ({
-    strokeIdx: p.rampStrokeIdx,
-    s: p.rampCutS,
-    keepBelow: p.rampEnd === 1,
-  }));
+  // A turning head cuts its stroke back by the bulb's radius, which is the same
+  // shape of cut a ramp makes and goes in the same list.
+  const { plans: culDeSacs, diagnostics: culDeSacDiags } = planCulDeSacs(strokes, model.gateways);
+  diagnostics.push(...culDeSacDiags);
+
+  const rampCuts = [
+    ...rampPlans.map((p) => ({
+      strokeIdx: p.rampStrokeIdx,
+      s: p.rampCutS,
+      keepBelow: p.rampEnd === 1,
+    })),
+    ...culDeSacs.map((p) => ({ strokeIdx: p.strokeIdx, s: p.cutS, keepBelow: p.atEnd })),
+  ];
   // An option lane needs the kerb-side through lane to *end* at the gore, so it has
   // somewhere to branch from — the one place a diverge splits the road it leaves,
   // and only where the document asks for it.
@@ -298,7 +307,7 @@ export function compile(model: EditModel): Network {
     turnLanes = planTurnLanes(strokes, meetings, ranges, turnChoice, riroAt);
   }
 
-  const built = buildSegments(strokes, ranges, auxPlans, transitions, turnLanes.plans, driveOnRight, lanes);
+  const built = buildSegments(strokes, ranges, auxPlans, transitions, turnLanes.plans, driveOnRight, lanes, culDeSacs);
   diagnostics.push(...built.diagnostics);
 
   const { junctions, diagnostics: junctionDiags } = buildJunctions({
@@ -316,6 +325,7 @@ export function compile(model: EditModel): Network {
     driveOnRight,
   });
   diagnostics.push(...junctionDiags);
+  junctions.push(...buildCulDeSacs(culDeSacs, built.segments, built.ranges, lanes, junctions.length));
 
   applyJunctionOverrides(model, junctions, lanes, built.segments, diagnostics);
   // After the overrides: the control choice decides whether STOP gets painted.

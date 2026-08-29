@@ -25,6 +25,48 @@ export interface Frontage {
   half: number;
   /** Which side of the road, in the segment's own frame: +1 left, -1 right. */
   side: 1 | -1;
+  /**
+   * A plot around a turning head, which faces the bulb from outside and so has no
+   * position along the centreline to be described by. `s` still says where the
+   * driveway meets the road — just inside the end — so the traffic model finds it
+   * with the same lookup as every other address; only the geometry differs.
+   */
+  head?: HeadPlot;
+}
+
+/** Where a turning head's plot sits on the bulb, in the bulb's own frame. */
+export interface HeadPlot {
+  cx: number;
+  cy: number;
+  radius: number;
+  /** Angle of the plot's centre around the bulb, radians. */
+  angle: number;
+  /**
+   * The lane side that serves this door — the one *leaving* the head.
+   *
+   * The bulb's driveways open onto the turning circle, so a driver goes round it to
+   * reach one, and is therefore on the way out by the time they stop. Stated as a
+   * lane side rather than a kerb so the traffic model can check it without knowing
+   * which side of the road the world drives on.
+   */
+  fromSide: 1 | -1;
+}
+
+/**
+ * A turning head at one end of a segment, as the frontage walk needs to see it.
+ */
+export interface TurningHead {
+  /** True when the head is at the segment's high-arc-length end. */
+  atEnd: boolean;
+  cx: number;
+  cy: number;
+  radius: number;
+  /** Direction from the bulb centre back down the road, radians. */
+  mouth: number;
+  /** Half the angle the road's own mouth takes out of the circle. */
+  mouthHalf: number;
+  /** Lane side leaving the head: the one a driver is on once they have gone round. */
+  outSide: 1 | -1;
 }
 
 export const FRONTAGE = {
@@ -53,10 +95,11 @@ export const FRONTAGE = {
  * and a recompile never reshuffles the town.
  */
 export function frontagesOf(
-  length: number, use: LandUse, segmentId: number,
+  length: number, use: LandUse, segmentId: number, heads: ReadonlyArray<TurningHead> = [],
 ): Frontage[] {
   const out: Frontage[] = [];
-  if (length < FRONTAGE.endClearance * 2 + FRONTAGE.minWidth) return out;
+  for (const head of heads) out.push(...headFrontages(length, use, head));
+  if (length < FRONTAGE.endClearance * 2 + FRONTAGE.minWidth) return out.sort(bySeq);
   const houses = use === 'residential';
   const widths = houses ? FRONTAGE.houseWidth : FRONTAGE.shopWidth;
   const gaps = houses ? FRONTAGE.houseGap : FRONTAGE.shopGap;
@@ -75,6 +118,64 @@ export function frontagesOf(
       s += width + gaps[0] + rng.next() * (gaps[1] - gaps[0]);
     }
   }
-  out.sort((a, b) => a.s - b.s || a.side - b.side);
+  out.sort(bySeq);
   return out;
 }
+
+const bySeq = (a: Frontage, b: Frontage): number => a.s - b.s || a.side - b.side;
+
+/**
+ * The ring of plots around a turning head.
+ *
+ * A cul-de-sac's houses stand round the bulb rather than along a street, which is
+ * the whole visual point of one — and they are wedges, wider at the back than at the
+ * kerb, because that is what a plot on the outside of a circle is. Everything but
+ * the mouth the road comes in through is available; each plot takes an equal share
+ * of what is left, so the ring closes rather than leaving one ragged gap.
+ *
+ * The driveway meets the road just inside the end, so a driver heading for one of
+ * these houses drives to the head — which is also the only place they can turn round.
+ */
+function headFrontages(length: number, use: LandUse, head: TurningHead): Frontage[] {
+  const houses = use === 'residential';
+  const widths = houses ? FRONTAGE.houseWidth : FRONTAGE.shopWidth;
+  const span = Math.PI * 2 - 2 * head.mouthHalf - HEAD_MOUTH_GAP * 2;
+  if (span <= 0) return [];
+  // Sized where the houses stand, not at the kerb. A plot on the outside of a circle
+  // is a wedge, so counting by its kerb width gives a ring of three vast gardens on a
+  // bulb that in reality holds five or six houses.
+  const count = Math.max(0, Math.round(
+    (span * (head.radius + HEAD_PLOT_DEPTH / 2)) / ((widths[0] + widths[1]) / 2)));
+  if (count < 2) return [];
+  const step = span / count;
+  if (step * head.radius < FRONTAGE.minWidth) return [];
+  const out: Frontage[] = [];
+  for (let i = 0; i < count; i++) {
+    // Walk from one side of the mouth round to the other.
+    const angle = head.mouth + head.mouthHalf + HEAD_MOUTH_GAP + step * (i + 0.5);
+    // A share of the ring, less a fence line — proportional rather than a fixed gap,
+    // so a tight bulb does not spend most of its circumference on gaps.
+    const half = step * head.radius * HEAD_PLOT_SHARE / 2;
+    out.push({
+      // Far enough back down the road that a driver who has just come round the head
+      // has somewhere to stop: an address in the first few metres of a lane is one
+      // the arrival rule cannot use, and the driver would sail past it and out.
+      s: head.atEnd ? Math.max(0, length - HEAD_DRIVEWAY) : Math.min(length, HEAD_DRIVEWAY),
+      half,
+      side: 1,
+      head: {
+        cx: head.cx, cy: head.cy, radius: head.radius, angle, fromSide: head.outSide,
+      },
+    });
+  }
+  return out;
+}
+
+/** Clear of the road's own mouth, so no plot is laid across the carriageway. */
+const HEAD_MOUTH_GAP = 0.12;
+/** How far inside the road's end the head's driveways meet it. */
+const HEAD_DRIVEWAY = 16;
+/** Roughly where a house on the head stands, for sizing the ring. */
+const HEAD_PLOT_DEPTH = 14;
+/** How much of each share is plot rather than the gap between neighbours. */
+const HEAD_PLOT_SHARE = 0.86;

@@ -455,20 +455,26 @@ describe('marking the ends of the network', () => {
     return h;
   }
 
-  it('cycles one end through all four roles and back', () => {
+  it('cycles one end through all five roles and back', () => {
     const h = road();
     const inspect = new InspectTool();
     const portal = h.store.network.portals[0]!;
     const seen: string[] = [portal.role];
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 5; i++) {
       h.click(inspect, portal.x, portal.y);
       h.settle();
+      // The last step builds a turning head, and a turning head is not a portal —
+      // that is the point of it. It has to stay clickable all the same, or the one
+      // state you cannot see is the one you need in order to undo it.
       const again = h.store.network.portals.find(
         (p) => Math.hypot(p.x - portal.x, p.y - portal.y) < 1,
-      )!;
-      seen.push(again.role);
+      );
+      const head = h.store.network.junctions.find(
+        (j) => j.kind === 'culdesac' && Math.hypot(j.x - portal.x, j.y - portal.y) < 1,
+      );
+      seen.push(again ? again.role : head ? 'culdesac' : 'gone');
     }
-    expect(seen).toEqual(['both', 'entry', 'exit', 'off', 'both']);
+    expect(seen).toEqual(['both', 'entry', 'exit', 'off', 'culdesac', 'both']);
   });
 
   it('leaves no override behind when an end is set back to both', () => {
@@ -480,7 +486,7 @@ describe('marking the ends of the network', () => {
     h.click(inspect, portal.x, portal.y);
     h.settle();
     expect(h.store.model.gateways.length).toBe(1);
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 4; i++) {
       h.click(inspect, portal.x, portal.y);
       h.settle();
     }

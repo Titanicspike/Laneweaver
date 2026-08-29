@@ -345,6 +345,32 @@ interface Frame {
   x: number; y: number; tx: number; ty: number; nx: number; ny: number;
 }
 
+/**
+ * The frame `offset` metres along a frontage from its centre.
+ *
+ * A plot round a turning head has no position along the centreline to be taken from:
+ * it faces the bulb from outside, so its frame is radial and its own "along" runs
+ * round the circle. Everything downstream — the trapezium of ground, the probe for
+ * how deep it can go, the building laid out square to the road — works off these
+ * three frames and needs no further special case.
+ */
+function frameOn(segment: Segment, front: Frontage, offset: number, out: Frame): void {
+  const head = front.head;
+  if (!head) {
+    const length = segment.arclength[segment.arclength.length - 1];
+    frameAt(segment, Math.min(length, Math.max(0, front.s + offset)), front.side, out);
+    return;
+  }
+  const angle = head.angle + offset / head.radius;
+  out.nx = Math.cos(angle);
+  out.ny = Math.sin(angle);
+  out.tx = -out.ny;
+  out.ty = out.nx;
+  const kerb = head.radius + PLOT.kerbClearance;
+  out.x = head.cx + out.nx * kerb;
+  out.y = head.cy + out.ny * kerb;
+}
+
 function frameAt(segment: Segment, s: number, side: 1 | -1, out: Frame): void {
   samplePosition(segment.centerline, segment.arclength, s, _pos);
   sampleTangent(segment.centerline, segment.arclength, s, _tan);
@@ -472,12 +498,14 @@ function placePlot(
   onRoad: Pavement, claimed: Claimed,
 ): Plot | null {
   const length = segment.arclength[segment.arclength.length - 1];
-  const a = Math.max(0, front.s - front.half);
-  const b = Math.min(length, front.s + front.half);
-  if (b - a < 6) return null;
-  frameAt(segment, a, front.side, _fa);
-  frameAt(segment, b, front.side, _fb);
-  frameAt(segment, front.s, front.side, _fm);
+  // Offsets from the frontage's centre, clipped to the road for a plot along it and
+  // taken whole for one round a head, which is not on the road at all.
+  const lo = front.head ? -front.half : Math.max(0, front.s - front.half) - front.s;
+  const hi = front.head ? front.half : Math.min(length, front.s + front.half) - front.s;
+  if (hi - lo < 6) return null;
+  frameOn(segment, front, lo, _fa);
+  frameOn(segment, front, hi, _fb);
+  frameOn(segment, front, (lo + hi) / 2, _fm);
 
   const width = Math.hypot(_fb.x - _fa.x, _fb.y - _fa.y);
   if (width < 6) return null;

@@ -287,6 +287,26 @@ export function cases(): Case[] {
     add(m, freeway(m, 3), pts(-1200, 200, -400, -60, 400, 40, 1200, -120));
     add(m, ramp(m, 1), pts(-700, 120, -450, 0, -250, -66));
   }, [-280, -40], 2.6);
+  // Cul-de-sacs: the turning head, the U-turn inside it, and the ring of houses
+  // round it. Two widths, because the bulb is sized from the road it closes.
+  const homeStreet = (m: EditModel, name: string, lanes: number, width: number) =>
+    prof(m, {
+      name, lanesForward: lanes, lanesBackward: lanes, laneWidth: width,
+      speedLimit: kph(40), landUse: 'residential', verge: 2,
+    });
+  make('culdesac', (m) => {
+    add(m, prof(m, { name: 'collector', lanesForward: 1, lanesBackward: 1, laneWidth: 3.5, speedLimit: kph(60) }),
+      pts(-260, 0, 260, 0));
+    add(m, homeStreet(m, 'st', 1, 3.2), pts(0, 0, 0, 200));
+    m.gateways.push({ x: 0, y: 200, role: 'culdesac' });
+  }, [0, 120], 2.2);
+  make('culdesac-curved', (m) => {
+    add(m, prof(m, { name: 'collector', lanesForward: 1, lanesBackward: 1, laneWidth: 3.5, speedLimit: kph(60) }),
+      pts(-260, 0, 260, 0));
+    add(m, homeStreet(m, 'st2', 2, 3.5), pts(0, 0, 60, 120, 10, 230));
+    m.gateways.push({ x: 10, y: 230, role: 'culdesac' });
+  }, [20, 140], 2.2);
+
   // The document the app opens with: curved, mixed grades, ramps and street
   // junctions. Whatever the zoo misses, the thing the user actually looks at.
   out.push({ name: 'demo-document', model: createDemoDocument(), at: [0, 0], zoom: 1 });

@@ -170,6 +170,44 @@ function zoned(use: LandUse): Network {
   return compile(m);
 }
 
+describe('houses round a turning head', () => {
+  // The point of a cul-de-sac, visually: the houses stand round the bulb rather than
+  // along a street. They are wedges — wider at the back than at the kerb — because
+  // that is what a plot on the outside of a circle is, and the plot layout gets that
+  // for free once its frame comes from the circle instead of from the centreline.
+  const net = (() => {
+    const m = createDocument(9);
+    const home: RoadProfile = {
+      id: m.nextId++, name: 'home', lanesForward: 1, lanesBackward: 1, laneWidth: 3.2,
+      speedLimit: kph(40), median: 0, shoulder: 0.3, isRamp: false, landUse: 'residential',
+    };
+    m.profiles.push(home);
+    m.strokes.push({ id: m.nextId++, profileId: home.id, points: pts(0, 0, 0, 220) });
+    m.gateways.push({ x: 0, y: 220, role: 'culdesac' });
+    return compile(m);
+  })();
+  const head = net.junctions.find((j) => j.kind === 'culdesac')!;
+  const plots = layoutBuildings(net);
+  const round = plots.filter(
+    (p) => Math.hypot(p.footprint[0] - head.x, p.footprint[1] - head.y) < head.radius + PLOT.houseDepth);
+
+  it('stands them round the bulb', () => {
+    expect(round.length, 'houses at the head').toBeGreaterThanOrEqual(3);
+    // Spread around it, not stacked along one bearing: a ring, not a terrace.
+    const bearings = round.map((p) => Math.atan2(p.footprint[1] - head.y, p.footprint[0] - head.x));
+    const spread = Math.max(...bearings) - Math.min(...bearings);
+    expect(spread, 'bearings covered by the ring').toBeGreaterThan(1.5);
+  });
+
+  it('keeps them off the turning circle', () => {
+    const rings = new Tarmac(net);
+    for (const plot of round) {
+      expect(rings.hit(plot.footprint), 'a house on the turning head').toBeNull();
+      if (plot.paving.length >= 6) expect(rings.hit(plot.paving)).toBeNull();
+    }
+  });
+});
+
 describe('plots and buildings', () => {
   const net = zoned('residential');
   const plots = layoutBuildings(net);

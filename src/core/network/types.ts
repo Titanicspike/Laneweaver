@@ -158,7 +158,16 @@ export interface EditSettings {
 export type SpawnMode = 'portals' | 'gateways' | 'landuse' | 'mixed';
 
 /** What role a place where the network stops plays in the gateway spawn mode. */
-export type GatewayRole = 'both' | 'entry' | 'exit' | 'off';
+/**
+ * What one end of the network does.
+ *
+ * The first four are about demand — whether trips may begin or finish here. The
+ * last is about the road: `culdesac` builds a turning head, wires the traffic
+ * straight back out of it, and stops being an end of the network at all. It sits in
+ * the same list because to the person clicking the end it is the same question,
+ * asked once: what happens here.
+ */
+export type GatewayRole = 'both' | 'entry' | 'exit' | 'off' | 'culdesac';
 
 /**
  * A user's choice about one end of the network, keyed by position.
@@ -622,7 +631,7 @@ export interface Segment {
   symbols: RoadSymbol[];
 }
 
-export type JunctionKind = 'crossing' | 'merge' | 'diverge' | 'link';
+export type JunctionKind = 'crossing' | 'merge' | 'diverge' | 'link' | 'culdesac';
 export type JunctionControl = 'priority' | 'signal' | 'allway-stop';
 
 export interface SignalPhase {
