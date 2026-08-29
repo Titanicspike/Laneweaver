@@ -888,16 +888,9 @@ export class Simulation {
    * it out is exactly right.
    */
   private retarget(i: number, laneId: number): void {
-    let best = -1;
-    let bestCost = Infinity;
-    for (const portal of this.net.portals) {
-      if (!portal.exitLanes.length || portal.id === this.store.dest[i]) continue;
-      const c = this.router.costTo(portal.id)[laneId];
-      if (c < bestCost) {
-        bestCost = c;
-        best = portal.id;
-      }
-    }
+    // One search forwards from where the driver is, rather than one backwards from
+    // every portal on the map — see `Router.nearestExit`.
+    const best = this.router.nearestExit(laneId, this.store.dest[i]);
     if (best >= 0 && best !== this.store.dest[i]) {
       this.store.dest[i] = best;
       this.metrics.missedExits++;

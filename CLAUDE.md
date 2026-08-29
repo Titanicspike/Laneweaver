@@ -799,7 +799,11 @@ to change lanes" and "can I get there from this lane at all" in one lookup, and 
 automatically when a driver ends up somewhere unplanned. A driver whose destination falls out of
 reach is re-targeted to the nearest reachable exit *other than the one they just failed to make*,
 rather than stopping dead or vanishing — see **Highway merges** for why that exclusion is what makes
-missing an exit possible at all.
+missing an exit possible at all. That search runs **forwards, from the driver** (`nearestExit`), and
+stops at the first exit it settles. Asking it backwards — "which of the network's exits is cheapest
+from here" — is the same question and costs one whole-graph search *per portal*: on a four-mile
+import, 2,549 searches and most of a gigabyte of cost tables, all set off by the first driver to
+miss an exit.
 
 **A red you cannot stop for is one you were never offered.** Where two junctions sit a few metres
 apart — which imported data is full of, and which the compiler itself produces when it pulls two
@@ -1768,7 +1772,8 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   never all-way stops.
 - **Perf smoke** (`npm run bench`): 5,000 vehicles on a synthetic 287 km-of-lane freeway network.
   Currently compile 68 ms, tick 2.3 ms median under Vitest (budget 6, see the harness note below),
-  street-level frame 0.6 ms.
+  street-level frame 0.6 ms. That network is a fixed size, which is the one thing it cannot measure —
+  see `scratch/simscale.ts` under the tarpits.
   Compiling was 117 ms until the offsetter stopped allocating four typed arrays per call, stopped
   using `Math.hypot` where a `sqrt` does — V8's guards against overflow, and world coordinates are
   metres — and stopped hunting for self-intersections in offsets that cannot have folded. It is the
@@ -1890,6 +1895,12 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   against a two-lane road still applies after it is widened to three.
 - **Priority cycles** cause frozen intersections — `priorityRank` is produced by a sort with a unique
   final tie-break, so it is a total order by construction. There is a validation check; keep it.
+- **A cost that scales with the network, not the traffic.** `npm run bench` runs one synthetic
+  network of a fixed size, so it cannot see one: the tick was 0.4 ms on a two-mile import and 47 ms
+  on a four-mile one, with the same few hundred vehicles on it. It was `retarget` asking every portal
+  in turn how far away it was, each answer a whole-graph Dijkstra. `npx tsx scratch/simscale.ts`
+  prints the per-pass breakdown at two, three and four miles for exactly this: a pass whose number
+  grows faster than the vehicle count is doing something per-lane or per-portal.
 - **Float32 in cost tables.** Route costs are `Float64Array` and lateral moves need to beat staying
   put by half a second. With float32 and a zero epsilon, two identical lanes differ by ~2e-6 and
   every vehicle decides it should change lanes, forever. This cost an afternoon.

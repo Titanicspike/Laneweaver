@@ -52,13 +52,31 @@ function laneCost(lane: Lane): number {
 
 /** Binary min-heap over lane ids, keyed by a cost array. */
 class Heap {
-  private readonly ids: Int32Array;
-  private readonly keys: Float64Array;
+  private ids: Int32Array;
+  private keys: Float64Array;
   private size = 0;
 
   constructor(capacity: number) {
     this.ids = new Int32Array(capacity + 1);
     this.keys = new Float64Array(capacity + 1);
+  }
+
+  /**
+   * Dijkstra here reinserts on improvement rather than decreasing a key, so the
+   * number of pushes is bounded by the *edges* relaxed, not by the nodes. One lane
+   * per node happens to be enough on every graph measured — but an out-of-bounds
+   * write to a typed array is silently ignored, so being wrong about that would not
+   * throw: it would drop entries, leave `size` counting them, and return route costs
+   * that are quietly incorrect. A wrong answer nobody is told about is the one bug
+   * class worth spending eight lines to make impossible.
+   */
+  private grow(): void {
+    const ids = new Int32Array(this.ids.length * 2);
+    const keys = new Float64Array(this.keys.length * 2);
+    ids.set(this.ids);
+    keys.set(this.keys);
+    this.ids = ids;
+    this.keys = keys;
   }
 
   get length(): number {
@@ -70,6 +88,7 @@ class Heap {
   }
 
   push(id: number, key: number): void {
+    if (this.size >= this.ids.length) this.grow();
     let i = this.size++;
     this.ids[i] = id;
     this.keys[i] = key;
@@ -120,8 +139,30 @@ export class Router {
   /** lane id -> lanes that can reach it, built once. */
   private readonly incoming: Int32Array[];
 
+  /** `laneCost` for every lane, worked out once: it is read on every edge relaxed. */
+  private readonly laneCosts: Float64Array;
+
+  /** Lane -> the portal it is an exit lane of, or -1. For `nearestExit`. */
+  private readonly exitPortal: Int32Array;
+
+  private readonly forward: Heap;
+  private readonly fwdCost: Float64Array;
+  private readonly fwdSeen: Int32Array;
+  private readonly fwdDone: Int32Array;
+  private fwdGeneration = 0;
+
   constructor(private readonly net: Network) {
     this.heap = new Heap(net.lanes.length + 1);
+    this.laneCosts = new Float64Array(net.lanes.length);
+    for (const lane of net.lanes) this.laneCosts[lane.id] = laneCost(lane);
+    this.exitPortal = new Int32Array(net.lanes.length).fill(-1);
+    for (const portal of net.portals) {
+      for (const id of portal.exitLanes) if (this.exitPortal[id] < 0) this.exitPortal[id] = portal.id;
+    }
+    this.forward = new Heap(net.lanes.length + 1);
+    this.fwdCost = new Float64Array(net.lanes.length);
+    this.fwdSeen = new Int32Array(net.lanes.length);
+    this.fwdDone = new Int32Array(net.lanes.length);
     // Zones continue the portals' id space, so a destination is one number
     // everywhere: in the store, in the spawner, and here.
     const destinations = net.portals.length + net.zones.length;
@@ -159,7 +200,7 @@ export class Router {
     const whole = !!portal;
     for (const id of seeds) {
       terminal[id] = 1;
-      const c = whole ? laneCost(lanes[id]) : 0;
+      const c = whole ? this.laneCosts[id] : 0;
       if (c < cost[id]) {
         cost[id] = c;
         this.heap.push(id, c);
@@ -174,26 +215,98 @@ export class Router {
       const base = cost[v];
       const lane = lanes[v];
 
-      for (const u of this.incoming[v]) {
-        const c = base + laneCost(lanes[u]);
+      // Indexed, and the lateral pair written out. Both of these were `for…of`,
+      // which allocates an iterator per settled node — and the lateral one built a
+      // two-element array as well. That is two allocations for every one of fifty
+      // thousand lanes, on every search, which is the same mistake the sim's hot
+      // loops are careful about and this is no less hot: it runs whole-graph.
+      const inc = this.incoming[v];
+      for (let k = 0; k < inc.length; k++) {
+        const u = inc[k];
+        const c = base + this.laneCosts[u];
         if (c < cost[u] - 1e-6) {
           cost[u] = c;
           this.heap.push(u, c);
         }
       }
       // Lane changes are edges too: reaching `v` laterally costs a change.
-      for (const w of [lane.left, lane.right]) {
-        if (w < 0) continue;
-        const c = base + LANE_CHANGE_COST;
-        if (c < cost[w] - 1e-6) {
-          cost[w] = c;
-          this.heap.push(w, c);
-        }
+      const lateral = base + LANE_CHANGE_COST;
+      const left = lane.left;
+      if (left >= 0 && lateral < cost[left] - 1e-6) {
+        cost[left] = lateral;
+        this.heap.push(left, lateral);
+      }
+      const right = lane.right;
+      if (right >= 0 && lateral < cost[right] - 1e-6) {
+        cost[right] = lateral;
+        this.heap.push(right, lateral);
       }
     }
 
     this.tables[destId] = cost;
     return cost;
+  }
+
+  /**
+   * The nearest portal reachable from `fromLane`, other than `exclude`, or -1.
+   *
+   * Asked **forwards**, from the driver. The backward form is the same question —
+   * "which exit is cheapest from here" — and answering it that way means one
+   * whole-graph search *per portal*: on a four-mile import that is 2,549 searches
+   * and most of a gigabyte of cost tables, all triggered by the first driver who
+   * misses an exit, and it took the tick from 0.6 ms to 46. Forwards, it is one
+   * search that stops at the first exit it settles, which on a road network is a few
+   * hundred lanes: the whole point of retargeting is that the driver takes the
+   * nearest way out, so there is no reason to look at the far side of the map.
+   *
+   * Generation-stamped scratch, so nothing is allocated or cleared per call.
+   */
+  nearestExit(fromLane: number, exclude: number): number {
+    const lanes = this.net.lanes;
+    const gen = ++this.fwdGeneration;
+    const cost = this.fwdCost;
+    const seen = this.fwdSeen;
+    const done = this.fwdDone;
+    const heap = this.forward;
+    heap.clear();
+    cost[fromLane] = 0;
+    seen[fromLane] = gen;
+    heap.push(fromLane, 0);
+
+    while (heap.length) {
+      const v = heap.pop();
+      if (done[v] === gen) continue;
+      done[v] = gen;
+      const here = this.exitPortal[v];
+      if (here >= 0 && here !== exclude) return here;
+
+      const base = cost[v];
+      const lane = lanes[v];
+      const succ = lane.successors;
+      for (let k = 0; k < succ.length; k++) {
+        const u = succ[k];
+        const c = base + this.laneCosts[u];
+        if (seen[u] !== gen || c < cost[u] - 1e-6) {
+          seen[u] = gen;
+          cost[u] = c;
+          heap.push(u, c);
+        }
+      }
+      const lateral = base + LANE_CHANGE_COST;
+      const left = lane.left;
+      if (left >= 0 && (seen[left] !== gen || lateral < cost[left] - 1e-6)) {
+        seen[left] = gen;
+        cost[left] = lateral;
+        heap.push(left, lateral);
+      }
+      const right = lane.right;
+      if (right >= 0 && (seen[right] !== gen || lateral < cost[right] - 1e-6)) {
+        seen[right] = gen;
+        cost[right] = lateral;
+        heap.push(right, lateral);
+      }
+    }
+    return -1;
   }
 
   /** Whether any lane of `portal`'s entries can reach `dest`. */

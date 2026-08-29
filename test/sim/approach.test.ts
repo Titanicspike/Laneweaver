@@ -171,13 +171,24 @@ describe('the box', () => {
   });
 
   it('keeps discharging when it is given more than it can take', () => {
-    const sim = new Simulation(net, { seed: 3, demandScale: 1.3 });
-    sim.run(420);
-    const before = sim.metrics.arrived;
-    sim.run(60);
-    // Degrade, do not lock. Locked, this was exactly zero from minute four onward.
-    expect(sim.metrics.arrived - before, 'arrivals in the final minute').toBeGreaterThan(10);
-    expect(sim.metrics.collisions).toBe(0);
-    expect(sim.metrics.lost).toBe(0);
+    // Over four seeds rather than one. What is being asserted is that a saturated
+    // junction degrades instead of locking — it was exactly zero from minute four
+    // onward when it locked — and a single seed's final-minute count is a noisy way
+    // to ask that: the same code gives 14 on one seed and 64 on another, because
+    // what a saturated junction discharges in any given minute depends on which
+    // phase it happens to be in and who is at the front of which queue.
+    let total = 0;
+    for (const seed of [1, 2, 3, 4]) {
+      const sim = new Simulation(net, { seed, demandScale: 1.3 });
+      sim.run(420);
+      const before = sim.metrics.arrived;
+      sim.run(60);
+      const discharged = sim.metrics.arrived - before;
+      expect(discharged, `seed ${seed} is not locked`).toBeGreaterThan(0);
+      expect(sim.metrics.collisions, `seed ${seed}`).toBe(0);
+      expect(sim.metrics.lost, `seed ${seed}`).toBe(0);
+      total += discharged;
+    }
+    expect(total, 'arrivals in the final minute across four seeds').toBeGreaterThan(40);
   });
 });

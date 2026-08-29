@@ -27,6 +27,13 @@ export const PLACES: Place[] = [
   { id: 'cupertino', name: 'Cupertino, California', lat: 37.3303843, lon: -122.0490306, size: 2,
     about: 'the target: suburban grid, I-280 and CA-85, service roads everywhere' },
 
+  // The same square at three and four miles, which is what "a bit bigger" costs.
+  // Four is the cap the app enforces: past that the download alone is the wait.
+  { id: 'cupertino-3mi', name: 'Cupertino, 3 miles', lat: 37.3303843, lon: -122.0490306, size: 3,
+    about: 'the target square, scaled up: how compile time grows with area' },
+  { id: 'cupertino-4mi', name: 'Cupertino, 4 miles', lat: 37.3303843, lon: -122.0490306, size: 4,
+    about: 'the largest the app will fetch' },
+
   { id: 'manhattan', name: 'Midtown Manhattan', lat: 40.7549, lon: -73.9840, size: 2,
     about: 'the densest regular grid there is, and almost all of it one-way' },
   { id: 'london', name: 'Central London', lat: 51.5074, lon: -0.1278, size: 2,
