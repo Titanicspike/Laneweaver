@@ -10,7 +10,7 @@ import { cloneControlPoint } from '../../core/network/model';
 import type { ControlPoint } from '../../core/network/types';
 import { removeStrokes, reshapeStroke, setPointGrade, setStrokeGrade } from '../commands';
 import { pickStroke, snap } from '../snapping';
-import { insertControlPoint, removeControlPoint } from '../curveEdit';
+import { addControlPointAt, addPlacement, insertControlPoint, removeControlPoint } from '../curveEdit';
 import type { PointerInfo, Tool, ToolEnv } from '../tool';
 import type { Camera } from '../../render/camera';
 import type { Theme } from '../../render/theme';
@@ -28,7 +28,8 @@ export class SelectTool implements Tool {
   readonly id = 'select';
   readonly name = 'Select';
   readonly hint =
-    'Click to select, drag points or handles to reshape. Alt-click adds or removes a point. ' +
+    'Click to select, drag points or handles to reshape. Alt-click adds a point — on the road to '
+    + 'get another handle, off it to take the road there. Alt-click a point to remove it. ' +
     'Delete removes the road; Tab cycles bridge/tunnel for the road, or for one point under the cursor.';
   readonly cursor = 'default';
 
@@ -77,7 +78,26 @@ export class SelectTool implements Tool {
         store.selection.clear();
         store.selection.add(stroke.id);
         env.requestRender();
+        return;
       }
+      // Off the road: add a point where the click actually is, which means the road
+      // has to move to reach it — carrying on past an end, or bending through it.
+      // Only ever the selected road: a click in open space is otherwise a guess at
+      // which of the roads around it was meant, and a wrong guess reshapes one you
+      // were not even looking at.
+      if (stroke) return;
+      const only = store.selection.size === 1 ? [...store.selection][0] : -1;
+      const chosen = store.model.strokes.find((s) => s.id === only);
+      if (!chosen) {
+        env.setStatus('Select one road first, then Alt-click to add a point to it.');
+        return;
+      }
+      const grown = addControlPointAt(chosen.points, p.worldX, p.worldY);
+      if (!grown) return;
+      const where = addPlacement(chosen.points, p.worldX, p.worldY);
+      store.run(reshapeStroke(chosen.id, chosen.points, grown, 'Add point'));
+      env.setStatus(where?.kind === 'extend' ? 'Road extended.' : 'Point added; the road now bends through it.');
+      env.requestRender();
       return;
     }
 

@@ -1267,8 +1267,22 @@ markings → signals) → vehicles (per grade) → editor overlays.
   snapping carries tangent continuity so extensions stay smooth; edge snapping is what the compiler
   then classifies as a merge or a diverge.
 - **Select**: drag points and handles (Alt breaks the mirror), drag the body to move, drag empty
-  space to box-select, Alt-click to add or remove a control point (de Casteljau, so the road's shape
-  does not move), Delete removes, Tab cycles grade.
+  space to box-select, Delete removes, Tab cycles grade.
+
+  **Alt-click adds a point, and where you click decides which kind.** There are two different things
+  people mean by it. *On* the road it means "give me another handle here": de Casteljau, so the shape
+  does not move at all — anything else would shift the road while you were only trying to get hold of
+  it. *Off* the road it means "go through here as well", and the road has to move, because the point
+  was not on it before: past an end it carries the road on, beside the middle it bends the nearest
+  span through the click. Alt-clicking an existing point removes it.
+
+  Past an end means past it **along the road**, not merely nearest to it — the end's own tangent
+  tells them apart, so standing off to one side of the last few metres is a bend in that span while
+  the same distance further on is the road carrying on. Only the two points either side of the new
+  one are re-smoothed, so shaping the rest of a road by hand is not undone by adding a point
+  somewhere else on it. And the off-road click only ever edits the **selected** road: a click in open
+  space is otherwise a guess at which of the roads around it was meant, and a wrong guess reshapes
+  one you were not even looking at.
 - **A T can be made right-in / right-out from the junction panel** — one switch, offered only where
   the junction is a T. While it is on the control buttons are put away (it runs on priority) and the
   left-bay choices are disabled, because the movement they would serve does not exist.
@@ -1480,7 +1494,7 @@ Roundabouts are the obvious next feature. None of it before merges are flawless.
 
 ## Testing strategy
 
-`npm test` runs 697 tests in about 130 s; the merge suite is most of that and is worth every
+`npm test` runs 704 tests in about 130 s; the merge suite is most of that and is worth every
 second. Two of them are red, both in `test/sim/committed-crossing.test.ts`, and they are the
 at-grade priority crossing under **Milestones** — not a flake and not something to re-run away.
 
@@ -1505,7 +1519,10 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   moves continuously across a lane boundary, and turns continuously whatever length it is —
   determinism (same seed → same hash; different seeds diverge; chunked stepping matches).
 - **Editor** (`test/editor/`): every tool driven headlessly through the same interface the canvas
-  uses — drawing, snapping, dragging, undo coalescing, ramp creation end to end. Levels get their
+  uses — drawing, snapping, dragging, undo coalescing, ramp creation end to end. Adding a point gets
+  its own file, because the gesture means two different things: on the road the shape must not move,
+  off it the road must reach the click, and a click past an end has to be told from one beside the
+  last span at the same distance. Levels get their
   own cases, because both halves of "draw a bridge" were broken independently: a road takes the
   level Tab left it on, one stroke climbs and comes back down, and a climbing road offers its ends
   to the ground and its flanks to the air. The junction
