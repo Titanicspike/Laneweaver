@@ -1856,6 +1856,13 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   where the roads genuinely do overlap (a ramp beside its motorway, parking aisles) rather than where
   the compiler put them wrong.
 
+  Twenty cached squares, five simulated minutes each — a hundred simulated minutes of somebody
+  else's road network — currently give **19,687 completed trips, 18 collisions, nothing lost** and
+  43 errors, all of them either a sliver junction the compiler is right to refuse or a ramp with no
+  room for an auxiliary lane. Compile runs from 285 ms on a small square to 3.1 s on four miles of
+  Cupertino, and the tick scales with the traffic rather than the map (`scratch/simscale.ts`).
+  Numbers, not adjectives: when one of them moves the wrong way, that is the regression.
+
   `scratch/junctionfuzz.ts` runs those same checks over several hundred generated junction shapes —
   three to six arms at awkward bearings, mismatched widths, curved approaches. The zoo has the shapes
   somebody thought of; this has the ones nobody did, and it is what found the three-arm spur above.
