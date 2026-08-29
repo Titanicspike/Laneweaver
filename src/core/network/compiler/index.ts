@@ -94,14 +94,109 @@ function buildZones(segments: Segment[], lanes: Lane[], firstId: number): Zone[]
   return out.filter((z) => z.lanes.length > 0);
 }
 
-function buildPortals(segments: Segment[], lanes: Lane[]): Portal[] {
+/**
+ * No road lane may simply stop inside the network.
+ *
+ * The end of the road is a portal and a perfectly good way to leave. A lane that
+ * runs *into a junction* and gets no movement out of it is not: there is no way on,
+ * no way back, and nothing marks the fact. Traffic drives to the end of it and is
+ * retired as lost, which is the one outcome the simulation is not allowed to have —
+ * and it is silent, because the dead-end check only looks at lanes that already know
+ * they end (`endsAt` set), which these do not.
+ *
+ * It happens on real data in two shapes. A junction where every arm is one-way
+ * *inward* has nothing to offer anybody: three roads pointing at a node, which is a
+ * broken ring on a roundabout or a one-way pair the data has back to front. And an
+ * auxiliary lane stacked behind another one can be given a merge target and no
+ * `endsAt` to go with it, so the model never presents the lane end it is supposed to
+ * merge before.
+ *
+ * The compiler already has the right answer for a lane that runs out of tarmac — it
+ * ends, and its traffic merges into the lane beside it — so that is what it gets.
+ * A lane with no neighbour to merge into keeps the dead end and says so, because
+ * inventing a movement there would be inventing a road.
+ */
+function tieOffDeadEnds(
+  segments: Segment[], lanes: Lane[], diagnostics: Diagnostic[],
+): Set<number> {
+  const stranded = new Set<number>();
+  for (const seg of segments) {
+    for (const id of seg.laneIds) {
+      const lane = lanes[id];
+      if (lane.kind !== LaneKind.Road || lane.successors.length) continue;
+      if (lane.endsAt < Infinity && lane.mergeTarget >= 0) continue;
+      // A free end is the edge of the map, not a dead end: that is a portal.
+      const junction = lane.side === 1 ? seg.endJunction : seg.startJunction;
+      if (junction < 0) continue;
+
+      let target = -1;
+      for (const side of [lane.left, lane.right]) {
+        if (side < 0) continue;
+        const other = lanes[side];
+        if (!other || other.kind !== LaneKind.Road || other.side !== lane.side) continue;
+        if (!other.successors.length) continue;
+        target = side;
+        break;
+      }
+      if (target < 0) {
+        // Nothing to merge into either: every lane here is in the same position,
+        // because the junction ahead has no movements at all. That is not a
+        // junction, it is where the network stops — a one-way pair the data has
+        // back to front, or a roundabout ring that was never closed. Say so, and
+        // let it become an exit portal rather than a hole traffic falls into.
+        stranded.add(lane.id);
+        diagnostics.push({
+          severity: 'warning', code: 'dead-end-lane',
+          message: 'A lane runs into this junction with no way out and no lane to merge into.',
+          laneId: lane.id,
+          x: lane.centerline[lane.centerline.length - 2],
+          y: lane.centerline[lane.centerline.length - 1],
+        });
+        continue;
+      }
+      lane.endsAt = Math.min(lane.endsAt, lane.length);
+      lane.mergeTarget = target;
+      diagnostics.push({
+        severity: 'warning', code: 'lane-merged-away',
+        message: 'A lane had no movement out of the junction ahead, so it merges into its neighbour.',
+        laneId: lane.id,
+        x: lane.centerline[lane.centerline.length - 2],
+        y: lane.centerline[lane.centerline.length - 1],
+      });
+    }
+  }
+  return stranded;
+}
+
+function buildPortals(
+  segments: Segment[], lanes: Lane[], stranded: Set<number> = new Set(),
+): Portal[] {
   const portals: Portal[] = [];
   for (const seg of segments) {
     for (const atEnd of [false, true]) {
       const junction = atEnd ? seg.endJunction : seg.startJunction;
-      if (junction >= 0) continue;
       const entry: number[] = [];
       const exit: number[] = [];
+      if (junction >= 0) {
+        // A junction here, so this is not a free end — with one exception. A lane
+        // that has no movement out of the junction ahead and no neighbour to merge
+        // into is where the network stops, whatever the junction says: `tieOffDeadEnds`
+        // has already established there is nothing else it can do. Making it an exit
+        // is what the portal rule says ("a lane with somewhere to go is not an
+        // exit"), and the alternative is a hole that traffic drives into and is
+        // written off in. Exit only, since these lanes all have predecessors.
+        for (const id of seg.laneIds) if (stranded.has(id)) exit.push(id);
+        if (exit.length) {
+          const ex = atEnd
+            ? [seg.centerline[seg.centerline.length - 2], seg.centerline[seg.centerline.length - 1]]
+            : [seg.centerline[0], seg.centerline[1]];
+          portals.push({
+            id: portals.length, name: `Portal ${portals.length + 1}`,
+            x: ex[0], y: ex[1], entryLanes: [], exitLanes: exit, weight: 1, role: 'exit',
+          });
+        }
+        continue;
+      }
       for (const id of seg.laneIds) {
         const lane = lanes[id];
         if (lane.aux) continue;
@@ -332,7 +427,11 @@ export function compile(model: EditModel): Network {
   // After the overrides: the control choice decides whether STOP gets painted.
   for (const junction of junctions) paintApproaches(lanes, built.segments, junction);
   dedupeLinks(lanes);
-  const portals = buildPortals(built.segments, lanes);
+  // After the overrides and the link cleanup, because both can leave a lane with
+  // nowhere to go, and before the portals, which read `successors` to decide what
+  // an end is.
+  const stranded = tieOffDeadEnds(built.segments, lanes, diagnostics);
+  const portals = buildPortals(built.segments, lanes, stranded);
   // The user's choice about each end of the network, keyed by position because
   // portal ids are derived data like everything else here.
   for (const portal of portals) {

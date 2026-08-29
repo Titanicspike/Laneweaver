@@ -1874,6 +1874,16 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   where the previous one did. One piece of road is emitted twice, lying exactly on top of itself,
   with two sets of lanes, two sets of paint and traffic on both. Every imported city had a handful
   (92 across sixteen) and no hand-drawn document had any, which is why it survived so long.
+- **No road lane may simply stop.** The end of the road is a portal and a fine way to leave; a lane
+  that runs *into a junction* and gets no movement out of it is not. There is no way on, no way back
+  and nothing marks it — the dead-end check only looks at lanes that already know they end — so
+  traffic drives to the end and is retired as lost. Real data produces it two ways: a junction whose
+  every arm is one-way *inward* (a broken roundabout ring, or a one-way pair the data has back to
+  front), and an auxiliary lane given a `mergeTarget` with no `endsAt` to go with it. `tieOffDeadEnds`
+  ends the lane and merges it into its neighbour where there is one, and where there is not — the
+  whole junction being a sink — the lane becomes an exit portal, because a lane with nowhere to go
+  *is* where the network stops. Across the imported cities that was 200-odd stranded lanes and every
+  lost vehicle; both are now zero, and a third more traffic completes its trip.
 - **A portal is where the network stops, not where no junction was recorded.** A plain split (step 8)
   wires its lanes straight across without a junction id, so reading "no junction at this end" as "the
   road ends here" drops an entry *and* an exit portal into the middle of a running carriageway.
