@@ -222,6 +222,33 @@ export function applyJunctionRules(sim: Simulation, i: number): void {
     // Below `jammedSpeed` is the whole test. A vehicle crossing normally is never
     // that slow for long, so this costs nothing at a junction that is discharging;
     // it only bites on one that has stopped, which is the only time it should.
+    // A red you cannot stop for is one you were never offered.
+    //
+    // Where two junctions sit a few metres apart — which imported data is full of,
+    // and which the compiler deliberately produces when it pulls two overlapping
+    // footprints apart — the road between them is shorter than a stopping distance.
+    // The signal rules first look at the second junction when the driver is already
+    // a metre from it doing thirteen metres a second: `mustStop` says yes, they
+    // brake at the cap, and they go through on red anyway, into the traffic that
+    // has the green. Nothing downstream can fix that, because by then there is no
+    // road left. The last stop line anybody actually offered them is this one.
+    //
+    // Only bites where the road beyond really is too short to stop in, so a normal
+    // exit lane never triggers it: a driver at 14 m/s needs fifty metres and a city
+    // block gives them a hundred.
+    const beyondId = connector.successors[0];
+    if (beyondId !== undefined) {
+      const beyond = net.lanes[beyondId];
+      const nextId = sim.edgeFor(beyondId, store.dest[i]);
+      if (nextId >= 0 && net.lanes[nextId].kind === LaneKind.Connector
+          && (v * v) / (2 * params.b) > beyond.length - JUNCTION.stopMargin
+          && sim.signals.mustStop(nextId, v, beyond.length)) {
+        sim.constrain(i, idmToStop(v, v0, Math.max(0.1, toEntry - JUNCTION.stopMargin * 0.5), params));
+        store.waitTime[i] += sim.dt;
+        return;
+      }
+    }
+
     let blocker = -1;
     let room = Infinity;
     const queued = store.laneLast[connectorId];

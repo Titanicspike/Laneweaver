@@ -801,6 +801,17 @@ reach is re-targeted to the nearest reachable exit *other than the one they just
 rather than stopping dead or vanishing — see **Highway merges** for why that exclusion is what makes
 missing an exit possible at all.
 
+**A red you cannot stop for is one you were never offered.** Where two junctions sit a few metres
+apart — which imported data is full of, and which the compiler itself produces when it pulls two
+overlapping footprints apart — the road between them is shorter than a stopping distance. The signal
+rules first look at the second junction when the driver is already a metre from it doing thirteen
+metres a second: `mustStop` says yes, they brake at the cap, and they cross on red anyway into the
+traffic that has the green. So the entry decision at a junction also asks what is immediately beyond
+it: if the road out is too short for this driver to stop in and the movement past it requires a stop,
+they wait *here*, at the last stop line anybody offered them. It only bites where the road really is
+that short — a normal exit lane gives a driver at 14 m/s the fifty metres they need — and across the
+imported cities it was worth more than any other single change to the junction model.
+
 **Junctions.** Decisions are made on the *approach*, and how far out that starts is derived from the
 driver's own stopping distance rather than being a fixed number — what the range has to cover is the
 distance this driver needs to stop, and that goes as the square of their speed. Ninety metres is a
@@ -1626,7 +1637,7 @@ Roundabouts are the obvious next feature. None of it before merges are flawless.
 
 ## Testing strategy
 
-`npm test` runs 739 tests in about 130 s; the merge suite is most of that and is worth every
+`npm test` runs 742 tests in about 130 s; the merge suite is most of that and is worth every
 second. Two of them are red, both in `test/sim/committed-crossing.test.ts`, and they are the
 at-grade priority crossing under **Milestones** — not a flake and not something to re-run away.
 
@@ -1653,6 +1664,15 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   a short fast stub whose ways out are one fast and several slow — plus all five shipped example
   maps in the spawn mode each of them actually uses, where this used to happen to one spawn in
   twenty.
+- **Closely-spaced junctions** (`test/sim/short-approach.test.ts`): two signalised crossings twenty
+  metres apart, which is the shape imports produce constantly and the zoo never had. It guards the
+  invariants — the compiler really does build it, nobody collides, nobody is lost, it still
+  discharges — and it deliberately does *not* claim to isolate the rule above: a synthetic pair will
+  not reproduce that failure however it is posed, because free-flowing the two signals never conflict
+  for long enough and congested the queue reaches back through the first junction, whose box-blocking
+  rule then stops anybody arriving at speed. Measured across eight seeds with the rule and without
+  it, the fixture gives the same number. The evidence for the rule is `scratch/osmcheck.ts`, which
+  needs a real network.
 - **Junction control** (`test/network/junction-control.test.ts`): which control a crossing gets, and
   in particular that a crossing of a road nobody can find a gap in is not left on priority — on the
   speed rather than on the size of the road, and never over the document's own choice.
@@ -1800,6 +1820,13 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   zoo. And a point outside the hull is fine if a road is under it, which is what "asphalt with no
   road behind it" actually means.
 
+  `scratch/osmcheck.ts` and `scratch/osmaudit.ts` do the same for the imported cities, which is where
+  the compiler's geometry is actually tested: the zoo has the shapes somebody thought of, a city has
+  the ones nobody did. The audit reports zero on the zoo and 149 on a two-mile square of Cupertino,
+  and the difference is the point — most of them are one road's paint lying inside another's asphalt,
+  where the roads genuinely do overlap (a ramp beside its motorway, parking aisles) rather than where
+  the compiler put them wrong.
+
   `scratch/junctionfuzz.ts` runs those same checks over several hundred generated junction shapes —
   three to six arms at awkward bearings, mismatched widths, curved approaches. The zoo has the shapes
   somebody thought of; this has the ones nobody did, and it is what found the three-arm spur above.
@@ -1836,6 +1863,12 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   way in, so the turning head was decoration and the feature looked finished from every angle except
   a running simulation. Whenever something is added for traffic to *do*, count how often traffic
   actually does it before believing it works — `test/sim/culdesac.test.ts` exists for that reason.
+- **The ranges of one stroke must be disjoint and in order.** Two junction footprints that overlap
+  along a road get pushed apart so a segment fits between them; unclamped, that inverts the near one
+  — `hi` ends up behind `lo` — and the cursor then never advances past it, so the next segment starts
+  where the previous one did. One piece of road is emitted twice, lying exactly on top of itself,
+  with two sets of lanes, two sets of paint and traffic on both. Every imported city had a handful
+  (92 across sixteen) and no hand-drawn document had any, which is why it survived so long.
 - **A portal is where the network stops, not where no junction was recorded.** A plain split (step 8)
   wires its lanes straight across without a junction id, so reading "no junction at this end" as "the
   road ends here" drops an entry *and* an exit portal into the middle of a running carriageway.

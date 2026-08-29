@@ -114,9 +114,16 @@ export function planSegmentRanges(
       const prev = blocked[i - 1];
       const cur = blocked[i];
       if (prev.hi + MIN_SEGMENT_LENGTH <= cur.lo) continue;
+      // Clamped inside each footprint's own extent. Unclamped, a pair that genuinely
+      // *overlaps* — two junctions closer together than either is wide, which real
+      // data is full of — comes out inverted, with `hi` behind `lo`. The cursor
+      // below then never advances past it and the next segment starts where the
+      // previous one did: one piece of road emitted twice, lying exactly on top of
+      // itself, with two sets of lanes, two sets of paint and traffic in both. Every
+      // imported city had a handful and no hand-drawn document had any.
       const mid = (prev.hi + cur.lo) * 0.5;
-      prev.hi = mid - MIN_SEGMENT_LENGTH * 0.5;
-      cur.lo = mid + MIN_SEGMENT_LENGTH * 0.5;
+      prev.hi = Math.max(prev.lo, mid - MIN_SEGMENT_LENGTH * 0.5);
+      cur.lo = Math.min(cur.hi, mid + MIN_SEGMENT_LENGTH * 0.5);
       diagnostics.push({
         severity: 'warning', code: 'junctions-too-close',
         message: 'Two junctions nearly overlap; their footprints were pulled apart.',
@@ -138,7 +145,12 @@ export function planSegmentRanges(
           x: meetings[b.meeting].x, y: meetings[b.meeting].y, strokeId: stroke.stroke.id,
         });
       }
-      cursor = Math.max(cursor, Math.min(b.hi, hi));
+      // Never behind the point this segment was just ended at, whatever the footprint
+      // says: `end` is where the road stopped, so the next stretch of it starts there
+      // or later. A backstop for the same failure as the clamp above, kept because it
+      // is the invariant that actually matters — the ranges of one stroke are
+      // disjoint and in order.
+      cursor = Math.max(cursor, end, Math.min(b.hi, hi));
       prevMeeting = b.meeting;
     }
     if (hi - cursor >= MIN_SEGMENT_LENGTH) {
