@@ -40,9 +40,31 @@ export function simplifyPolyline(points: ArrayLike<number>, tolerance: number): 
   const n = points.length >> 1;
   if (n < 3) return Float32Array.from(points as ArrayLike<number>);
   const keep = new Uint8Array(n);
-  keep[0] = 1;
-  keep[n - 1] = 1;
-  const stack: [number, number][] = [[0, n - 1]];
+  markKept(points, 0, n - 1, tolerance, keep);
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    if (keep[i]) out.push(points[i * 2], points[i * 2 + 1]);
+  }
+  return Float32Array.from(out);
+}
+
+/**
+ * Which points of `points[lo..hi]` Douglas–Peucker keeps, written into `keep`.
+ *
+ * Separate from `simplifyPolyline` because a ring is not one polyline: a road's
+ * surface runs up one edge and back down the other, and simplifying across the join
+ * would cut the corner off the end cap. Marking the two runs separately keeps the
+ * corners exactly and leaves the split index recoverable. Callers that need the
+ * *indices* — to carry a parallel array like the per-point height along with the
+ * geometry — need this rather than the points.
+ */
+export function markKept(
+  points: ArrayLike<number>, lo: number, hi: number, tolerance: number, keep: Uint8Array,
+): void {
+  if (hi <= lo) { if (hi >= 0) keep[hi] = 1; if (lo >= 0) keep[lo] = 1; return; }
+  keep[lo] = 1;
+  keep[hi] = 1;
+  const stack: [number, number][] = [[lo, hi]];
   const tol2 = tolerance * tolerance;
   while (stack.length) {
     const [lo, hi] = stack.pop()!;
@@ -69,11 +91,6 @@ export function simplifyPolyline(points: ArrayLike<number>, tolerance: number): 
     keep[worst] = 1;
     stack.push([lo, worst], [worst, hi]);
   }
-  const out: number[] = [];
-  for (let i = 0; i < n; i++) {
-    if (keep[i]) out.push(points[i * 2], points[i * 2 + 1]);
-  }
-  return Float32Array.from(out);
 }
 
 /** One fitted cubic: its two ends and the two handles between them. */

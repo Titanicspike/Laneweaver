@@ -13,6 +13,7 @@ import { LaneKind } from '../core/network/types';
 import { samplePosition, type Bbox } from '../core/geom/polyline';
 import type { Simulation } from '../core/sim/sim';
 import { Camera } from './camera';
+import { StaticLayer } from './staticLayer';
 import { DARK, LOD, WIDTHS, type Theme } from './theme';
 import { NetworkPaths, lineWidth, type Tile } from './networkPaths';
 import type { TerrainField } from '../core/terrain/terrain';
@@ -39,6 +40,9 @@ export interface RenderInput {
 }
 
 export interface RenderStats {
+  /** Frames the static picture was reused on, and frames it had to be redrawn. */
+  blits: number;
+  captures: number;
   drawMs: number;
   tiles: number;
   vehicles: number;
@@ -50,7 +54,35 @@ const _pt = { x: 0, y: 0 };
 export class Renderer {
   readonly camera = new Camera();
   theme: Theme = DARK;
-  readonly stats: RenderStats = { drawMs: 0, tiles: 0, vehicles: 0 };
+  readonly stats: RenderStats = {
+    drawMs: 0, tiles: 0, vehicles: 0, blits: 0, captures: 0,
+  };
+
+  /**
+   * Milliseconds per pass for the last frame, the same way `sim.timings` works and
+   * for the same reason: a dozen clock reads a frame is nothing next to the work
+   * being measured, and having the breakdown is what makes "the map is laggy"
+   * answerable instead of a guess. Accumulated across the grade stacks, since a
+   * pass runs once per level and the question is what the *pass* costs.
+   */
+  readonly timings: Record<string, number> = {};
+
+  private mark = 0;
+
+  /** A copy of the busiest grade's static picture; see `StaticLayer`. */
+  private readonly staticLayer = new StaticLayer();
+
+  private cachedGrade = Number.NaN;
+
+  private lastPaths: unknown = null;
+
+  private lastPathsVersion = -1;
+
+  private lap(key: string): void {
+    const now = performance.now();
+    this.timings[key] = (this.timings[key] ?? 0) + (now - this.mark);
+    this.mark = now;
+  }
 
   private readonly ctx: CanvasRenderingContext2D;
   private gradeOfLane = new Int8Array(0);
@@ -106,11 +138,41 @@ export class Renderer {
     const view = camera.visibleRect(40);
     this.stats.tiles = 0;
     this.stats.vehicles = 0;
+    this.stats.blits = 0;
+    this.stats.captures = 0;
+    for (const key of Object.keys(this.timings)) this.timings[key] = 0;
+    this.mark = started;
+    this.lap('clear');
+
+    // The cached picture is only good while the picture is the same one. Recompiling
+    // makes a new `NetworkPaths`; decorating an existing one bumps its version, which
+    // during a large town's fill-in is most frames — and a copy taken half way
+    // through would keep the houses that were there at the time.
+    if (input.paths !== this.lastPaths || input.paths.version !== this.lastPathsVersion) {
+      this.lastPaths = input.paths;
+      this.lastPathsVersion = input.paths.version;
+      this.staticLayer.invalidate();
+    }
+    // One grade is cached, and it is the one carrying the picture: a stack has to
+    // interleave with its traffic, so caching all of them would either draw cars
+    // through flyovers or cost an offscreen canvas per level.
+    this.cachedGrade = Number.NaN;
+    // Nothing to cache while the picture is still being made: decoration changes it
+    // every frame, so a copy would be stale before it was blitted and the capture
+    // would be pure overhead on top of a redraw that has to happen anyway.
+    if (input.paths.decorated) {
+      let busiest = 0;
+      for (const grade of input.paths.grades) {
+        const n = input.paths.query(grade, view).length;
+        if (n > busiest) { busiest = n; this.cachedGrade = grade; }
+      }
+    }
 
     if (input.geo) drawSatelliteTiles(ctx, camera, input.geo, view);
     if (input.terrain) drawTerrain(ctx, camera, theme, input.terrain, view);
     drawImageUnderlay(ctx, input.underlay);
     if (input.showGrid && camera.zoom >= LOD.grid) this.drawGrid(view);
+    this.lap('backdrop');
 
     for (const grade of input.paths.grades) {
       this.drawGradeStack(input, grade, view);
@@ -118,19 +180,64 @@ export class Renderer {
 
     if (input.showDiagnostics) this.drawDiagnostics(input.network);
     for (const overlay of input.overlays) overlay.draw(ctx, camera, theme);
+    this.lap('overlays');
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.stats.drawMs = performance.now() - started;
   }
 
   private drawGradeStack(input: RenderInput, grade: number, view: Bbox): void {
-    const { ctx, camera, theme } = this;
+    const { ctx, camera } = this;
     const tiles = input.paths.query(grade, view);
     if (!tiles.length) {
       this.drawVehicles(input, grade, view);
       return;
     }
     this.stats.tiles += tiles.length;
+
+    // The static half of the stack is the same roads, paint, houses and trees as
+    // last frame, in the same place, in the same colours: only the camera moved.
+    // Blit the copy if there is one, and take one if this is the grade worth it.
+    const cache = grade === this.cachedGrade ? this.staticLayer : null;
+    let painted = false;
+    if (cache && cache.blit(ctx, camera, grade)) {
+      painted = true;
+      this.stats.blits++;
+    } else if (cache) {
+      painted = cache.capture(ctx, camera, grade,
+        (target, cam, only) => this.drawStatic(target, cam, input, grade, only));
+      if (painted) this.stats.captures++;
+    }
+    if (!painted) this.drawStatic(ctx, camera, input, grade, null);
+    camera.applyTo(ctx);
+
+    if (camera.zoom >= LOD.signals) this.drawSignals(input.network, grade, view);
+    this.lap('signals');
+
+    this.drawVehicles(input, grade, view);
+    ctx.globalAlpha = 1;
+    this.lap('vehicles');
+  }
+
+  /**
+   * Everything in a grade stack that does not move between frames.
+   *
+   * Takes its context and camera rather than reading them off `this`, because it is
+   * called both straight onto the canvas and into `StaticLayer`'s larger offscreen —
+   * and in the second case every culling and level-of-detail decision has to be made
+   * against *that* camera or the margin comes out empty.
+   */
+  private drawStatic(
+    ctx: CanvasRenderingContext2D, camera: Camera, input: RenderInput, grade: number,
+    only: Bbox | null,
+  ): void {
+    const { theme } = this;
+    // `only` is the strip a pan has just uncovered. Culling to it as well as
+    // clipping to it is the point: a clip saves the rasterising, and the tile query
+    // saves walking a hundred thousand path points that land outside it.
+    const view = only ?? camera.visibleRect(40);
+    const tiles = input.paths.query(grade, view);
+    if (!tiles.length) return;
 
     const tunnel = grade < 0;
     const bridge = grade > 0;
@@ -153,6 +260,7 @@ export class Renderer {
       for (const tile of tiles) ctx.fill(tile.shadow);
       ctx.globalAlpha = tunnel ? theme.tunnelAlpha : 1;
     }
+    this.lap('shadow');
 
     // Casing: stroke the road's edges, then fill over the inner half of the stroke.
     // The outline used here leaves out any end cap the road drives straight through,
@@ -172,9 +280,11 @@ export class Renderer {
     for (const tile of tiles) ctx.stroke(tile.casing);
     ctx.lineCap = 'round';
     ctx.setLineDash([]);
+    this.lap('casing');
 
     ctx.fillStyle = theme.asphalt;
     for (const tile of tiles) ctx.fill(tile.asphalt);
+    this.lap('asphalt');
 
     if (camera.zoom >= LOD.markings) {
       ctx.strokeStyle = theme.markingEdge;
@@ -212,6 +322,7 @@ export class Renderer {
         for (const tile of tiles) ctx.stroke(tile.double);
       }
     }
+    this.lap('markings');
 
     // Buildings go under the planting: a street tree stands in front of the house
     // behind it, and drawing them the other way round puts the house over the tree.
@@ -253,6 +364,7 @@ export class Renderer {
         for (const tile of deco) ctx.stroke(tile.roofEdge);
       }
     }
+    this.lap('buildings');
 
     // Verge planting sits beside the road, so it goes down after the paint and
     // before anything that has to be read over the top of it.
@@ -262,6 +374,7 @@ export class Renderer {
       ctx.fillStyle = theme.treeHighlight;
       for (const tile of deco) ctx.fill(tile.treeTops);
     }
+    this.lap('trees');
 
 
     if (camera.zoom >= LOD.junctionDetail) {
@@ -278,18 +391,16 @@ export class Renderer {
       for (const tile of tiles) ctx.stroke(tile.stopBars);
       ctx.lineCap = 'round';
     }
+    this.lap('junctionDetail');
 
     // Arrows and word markings. Both are read at a glance rather than followed, so
     // they only earn their keep once a lane is a few pixels wide.
     if (camera.zoom >= LOD.symbols) {
       ctx.fillStyle = theme.markingWhite;
       for (const tile of tiles) ctx.fill(tile.arrows);
-      this.drawWords(tiles);
+      this.drawWords(ctx, tiles);
     }
-
-    if (camera.zoom >= LOD.signals) this.drawSignals(input.network, grade, view);
-
-    this.drawVehicles(input, grade, view);
+    this.lap('symbols');
     ctx.globalAlpha = 1;
   }
 
@@ -298,8 +409,8 @@ export class Renderer {
    * across the carriageway and the letters are stretched along it, which is why STOP
    * on a real road looks impossibly tall from above.
    */
-  private drawWords(tiles: ReadonlyArray<Tile>): void {
-    const { ctx, theme } = this;
+  private drawWords(ctx: CanvasRenderingContext2D, tiles: ReadonlyArray<Tile>): void {
+    const { theme } = this;
     let any = false;
     for (const tile of tiles) {
       for (const word of tile.words) {

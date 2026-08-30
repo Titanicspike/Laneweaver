@@ -17,7 +17,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { installCanvasGlobals, StubPath2D } from '../helpers/canvasStub';
+import { installCanvasGlobals, StubPath2D, callsSince } from '../helpers/canvasStub';
 installCanvasGlobals();
 
 import { NetworkPaths, SHADOW_OFFSET } from '@render/networkPaths';
@@ -114,6 +114,30 @@ function layer(paths: NetworkPaths, grade: number, which: 'casing' | 'shadow'): 
   return tiles.flatMap((tile) => subpaths(tile[which]));
 }
 
+/**
+ * The deck's own shadow: the biggest subpath in the layer.
+ *
+ * Not "the one with as many points as the surface ring" — the bake simplifies the
+ * geometry it draws (`BAKE_TOLERANCE`), so the drawn ring is a fifth of the compiled
+ * one and matching on length silently found nothing.
+ */
+function deckShadow(paths: NetworkPaths, grade: number): Subpath {
+  const found = layer(paths, grade, 'shadow')
+    .sort((a, b) => b.points.length - a.points.length)[0];
+  expect(found, `a level ${grade} deck casts a shadow`).toBeDefined();
+  return found!;
+}
+
+/** How far a subpath is thrown from a ring, comparing like extremes with like. */
+function displacement(cast: Subpath, ring: Float32Array): { at0: number; worst: number } {
+  let castMax = -Infinity;
+  let ringMax = -Infinity;
+  for (let i = 0; i < cast.points.length; i += 2) castMax = Math.max(castMax, cast.points[i]!);
+  for (let i = 0; i < ring.length; i += 2) ringMax = Math.max(ringMax, ring[i]!);
+  // Douglas-Peucker always keeps the first point, so index zero still lines up.
+  return { at0: cast.points[0]! - ring[0]!, worst: castMax - ringMax };
+}
+
 describe('a road that changes level', () => {
   it('agrees with itself about how high it is at the abutment', () => {
     const net = overpass(1);
@@ -154,11 +178,9 @@ describe('a road that changes level', () => {
     const ring = deck.surface;
     // The deck's shadow is its own ring pushed by the height at each point, so at
     // the abutment — half a storey up — it is half the full offset, not all of it.
-    const cast = layer(paths, 1, 'shadow')
-      .find((sub) => sub.points.length === ring.length);
-    expect(cast).toBeDefined();
-    expect(cast!.points[0]! - ring[0]!).toBeCloseTo(SHADOW_OFFSET.x * 0.5, 2);
-    expect(cast!.points[1]! - ring[1]!).toBeCloseTo(SHADOW_OFFSET.y * 0.5, 2);
+    const cast = deckShadow(paths, 1);
+    expect(cast.points[0]! - ring[0]!).toBeCloseTo(SHADOW_OFFSET.x * 0.5, 2);
+    expect(cast.points[1]! - ring[1]!).toBeCloseTo(SHADOW_OFFSET.y * 0.5, 2);
   });
 
   it('does not move the shadow four times as far for a fourth level', () => {
@@ -166,24 +188,17 @@ describe('a road that changes level', () => {
     // that has to keep working four levels up. Offset linearly, a level-three deck
     // throws its shadow twenty metres clear of the road that casts it, where it has
     // stopped reading as a shadow and started reading as another dark road.
-    const displacement = (grade: number): number => {
+    const thrown = (grade: number): number => {
       const net = overpass(grade);
       const paths = new NetworkPaths(net);
       const deck = net.segments.find((s) => s.grade === grade)!;
-      const cast = layer(paths, grade, 'shadow')
-        .find((sub) => sub.points.length === deck.surface.length);
-      expect(cast, `a level ${grade} deck casts a shadow`).toBeDefined();
       // The furthest the shadow is thrown anywhere along the deck. Point zero is at
       // the abutment, where every deck is half a level up whatever it climbs to, so
-      // comparing there compares two roads at the same height.
-      let worst = 0;
-      for (let i = 0; i < cast!.points.length; i += 2) {
-        worst = Math.max(worst, cast!.points[i]! - deck.surface[i]!);
-      }
-      return worst;
+      // comparing there would compare two roads at the same height.
+      return displacement(deckShadow(paths, grade), deck.surface).worst;
     };
-    const one = displacement(1);
-    const three = displacement(3);
+    const one = thrown(1);
+    const three = thrown(3);
     // Still ordered — a higher deck is still further out, or the stack stops reading
     // at all — but compressed well below the three times a linear offset would give.
     expect(three).toBeGreaterThan(one);
@@ -196,6 +211,7 @@ describe('a road that changes level', () => {
     // that differs between a deck and the road it lands on.
     const net = overpass(1);
     const paths = new NetworkPaths(net);
+    const mark = StubContext.instances.length;
     const canvas = new StubCanvas();
     const renderer = new Renderer(canvas as unknown as HTMLCanvasElement);
     renderer.camera.fit(net.bounds, 60);
@@ -204,10 +220,12 @@ describe('a road that changes level', () => {
       terrain: null, underlay: null, geo: null,
       showGrid: false, showDiagnostics: false, overlays: [],
     });
-    const ctx = canvas.context as unknown as StubContext;
+    // The static picture may have been drawn into the cache's own canvas rather
+    // than this one, so the question is what was stroked, not where.
+    const calls = callsSince(mark);
     const styleOf = (grade: number): string | undefined => {
       const casings = new Set(paths.query(grade, WORLD).map((t) => t.casing));
-      return ctx.calls.find((c) => c.op === 'stroke' && casings.has(c.args[0] as never))?.strokeStyle;
+      return calls.find((c) => c.op === 'stroke' && casings.has(c.args[0] as never))?.strokeStyle;
     };
     const deck = styleOf(1);
     const ground = styleOf(0);
@@ -245,6 +263,7 @@ describe('a road that changes level', () => {
   it('strokes the casing outline and never the surface itself', () => {
     const net = overpass(1);
     const paths = new NetworkPaths(net);
+    const mark = StubContext.instances.length;
     const canvas = new StubCanvas();
     const renderer = new Renderer(canvas as unknown as HTMLCanvasElement);
     renderer.camera.fit(net.bounds, 60);
@@ -254,7 +273,8 @@ describe('a road that changes level', () => {
       showGrid: false, showDiagnostics: false, overlays: [],
     });
     const ctx = canvas.context as unknown as StubContext;
-    const stroked = new Set(ctx.calls.filter((c) => c.op === 'stroke').map((c) => c.args[0]));
+    const stroked = new Set(
+      callsSince(mark).filter((c) => c.op === 'stroke').map((c) => c.args[0]));
     const tiles = [...paths.query(0, WORLD), ...paths.query(1, WORLD)];
     expect(tiles.length).toBeGreaterThan(1);
     for (const tile of tiles) {

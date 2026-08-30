@@ -29,6 +29,16 @@ export class StubPath2D {
 }
 
 export class StubContext {
+  /**
+   * Every context made in this process.
+   *
+   * The renderer keeps a cached bitmap of the static picture (`StaticLayer`), so
+   * roads and paint are drawn into an offscreen canvas's context and blitted, not
+   * onto the visible one. A test asking "was the casing stroked" wants the answer
+   * wherever it happened; a test asking about the *visible* canvas still has it.
+   */
+  static readonly instances: StubContext[] = [];
+
   readonly calls: DrawCall[] = [];
   fillStyle = '';
   strokeStyle = '';
@@ -40,6 +50,10 @@ export class StubContext {
   textAlign = '';
   textBaseline = '';
   private readonly stack: unknown[] = [];
+
+  constructor() {
+    StubContext.instances.push(this);
+  }
 
   private record(op: string, args: unknown[]): void {
     // The style at the moment of the call, not at the end of the frame: a renderer
@@ -70,6 +84,7 @@ export class StubContext {
   stroke(...a: unknown[]): void { this.record('stroke', a); }
   fillRect(...a: unknown[]): void { this.record('fillRect', a); }
   clearRect(...a: unknown[]): void { this.record('clearRect', a); }
+  drawImage(...a: unknown[]): void { this.record('drawImage', a); }
   strokeRect(...a: unknown[]): void { this.record('strokeRect', a); }
   setLineDash(...a: unknown[]): void { this.record('setLineDash', a); }
   rect(...a: unknown[]): void { this.record('rect', a); }
@@ -101,13 +116,38 @@ export class StubCanvas {
 }
 
 /** Installs the browser globals the renderer needs. Returns a restore function. */
+/**
+ * Draw calls made by every context created since `mark`, where `mark` was
+ * `StubContext.instances.length` before the thing under test built its canvases.
+ *
+ * A renderer that caches the static picture draws it into an offscreen canvas of
+ * its own, so "was the casing stroked" is a question about the frame rather than
+ * about one context. Tests that genuinely care *which* canvas — that a blit landed
+ * on the visible one, say — still read that context directly.
+ */
+export function callsSince(mark: number): DrawCall[] {
+  return StubContext.instances.slice(mark).flatMap((c) => c.calls);
+}
+
 export function installCanvasGlobals(): () => void {
   const g = globalThis as Record<string, unknown>;
-  const before = { Path2D: g.Path2D, devicePixelRatio: g.devicePixelRatio };
+  const before = {
+    Path2D: g.Path2D, devicePixelRatio: g.devicePixelRatio, document: g.document,
+  };
   g.Path2D = StubPath2D;
   g.devicePixelRatio = 1;
+  // Enough of a document for anything that makes its own canvas — the static
+  // layer's offscreen bitmap does — without pulling in jsdom for a geometry test.
+  if (!g.document) {
+    g.document = {
+      createElement(tag: string): unknown {
+        return tag === 'canvas' ? new StubCanvas() : {};
+      },
+    };
+  }
   return () => {
     g.Path2D = before.Path2D;
     g.devicePixelRatio = before.devicePixelRatio;
+    g.document = before.document;
   };
 }

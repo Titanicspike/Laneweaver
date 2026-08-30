@@ -1170,7 +1170,35 @@ markings → signals) → vehicles (per grade) → editor overlays.
 
 - Geometry is baked into `Path2D` once per recompile and bucketed into 800 m tiles, so a large
   network only pays for what is on screen. Everything draws in world units with the camera transform
-  applied, so line weights scale with zoom, with a pixel floor so nothing vanishes.
+  applied, so line weights scale with zoom, with a pixel floor so nothing vanishes. The transform's
+  translation is **snapped to whole device pixels**, which is what lets the static layer below be
+  blitted rather than resampled.
+- **The baked geometry is simplified, and four fifths of it goes** (`BAKE_TOLERANCE`, 1 cm). The
+  compiler flattens to 0.15 m and then caps a flattened segment at 20 m so its R-tree boxes stay
+  tight, and the offsetter emits a point wherever its source had one — so a straight road carries a
+  vertex every couple of metres that says nothing. On a two-mile import the surface rings came to
+  142,000 points and the markings to 167,000, and at a *two-millimetre* tolerance only a fifth of
+  either survives: the rest are exactly collinear. A centimetre is a quarter of a pixel at
+  `MAX_ZOOM`, so nothing it removes could ever have been seen. It is deliberately not keyed to zoom —
+  this geometry is not needed at *any* zoom, and one baked path that is right everywhere beats two
+  that have to be chosen between. The **shadow keeps the compiled ring**, because it is grown from a
+  per-point height and a straight deck is geometrically two points: simplifying it throws away every
+  point that carried the climb.
+- **The static picture is cached and scrolled** (`render/staticLayer.ts`). Panning redrew every road,
+  marking, house and tree in the same place and the same colours as the frame before, because the
+  camera had moved a few pixels: 202 ms a frame at zoom 0.3 on a two-mile import, and 46 ms at street
+  level. The static passes now go once into an offscreen canvas covering 1.4 viewports, and a pan
+  inside that margin is one `drawImage`. When the margin runs out the old bitmap is **scrolled in
+  place** — a canvas may be drawn onto itself — and only the strip that has come into view is drawn,
+  clipped to it and with the tiles culled to it, so a pan pays for the edge it uncovers rather than
+  for the map. Median frame on that import: **0 ms at every zoom**, worst 4.
+  - **Only one grade is cached**, the one with the most tiles on screen. A stack has to interleave —
+    a vehicle on the ground belongs *under* the bridge above it — so one bitmap of everything would
+    draw cars through flyovers, and one per level is a hundred megabytes at four levels on a machine
+    that is already struggling.
+  - **Nothing is cached while the picture is still being made.** Decoration changes it every frame,
+    so a copy would be stale before it was blitted.
+  - Signals, vehicles, overlays, diagnostics and the grid are drawn live on top, every frame.
 - Tunnels (grade < 0): dashed casing, fill and vehicles at ~40% alpha. Bridges (grade > 0): a
   **parapet** — lighter than the casing and wider — plus a two-layer drop shadow.
   - **Occlusion says which road is on top and nothing about why.** Without a shadow a stacked
@@ -1701,7 +1729,7 @@ Roundabouts are the obvious next feature. None of it before merges are flawless.
 
 ## Testing strategy
 
-`npm test` runs 760 tests in about 140 s; the merge suite is most of that and is worth every
+`npm test` runs 768 tests in about 140 s; the merge suite is most of that and is worth every
 second. Two of them are red, both in `test/sim/committed-crossing.test.ts`, and they are the
 at-grade priority crossing under **Milestones** — not a flake and not something to re-run away.
 
@@ -1830,6 +1858,13 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   into arcs, closes the ends inside the extract and leaves the boundary open, and
   compiles a roundabout whose circulating traffic has priority and whose junctions are
   never all-way stops.
+- **Frame cost** (`/renderbench.html?osm=cupertino&pan=1`, dev-only): what a frame really costs, in a
+  browser, on a real map, at a sweep of zooms, panning. `npm run bench` renders through a *stub*
+  canvas that records calls instead of rasterising, so it measures the renderer's own JavaScript and
+  none of the drawing — it reported 1.0 ms for a frame that a browser took 46 ms over, and 0.02 ms
+  for one that took 302. It is still worth having for the tick and the compile; it cannot be trusted
+  for a frame. `renderer.timings` breaks a frame down by pass the way `sim.timings` does, and is what
+  turned "the map is laggy" into "casing 128 ms of 268".
 - **Perf smoke** (`npm run bench`): 5,000 vehicles on a synthetic 287 km-of-lane freeway network.
   Currently compile 68 ms, tick 2.3 ms median under Vitest (budget 6, see the harness note below),
   street-level frame 0.6 ms. That network is a fixed size, which is the one thing it cannot measure —
@@ -1979,6 +2014,15 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   against a two-lane road still applies after it is widened to three.
 - **Priority cycles** cause frozen intersections — `priorityRank` is produced by a sort with a unique
   final tie-break, so it is a total order by construction. There is a validation check; keep it.
+- **A benchmark that measures the wrong half.** `npm run bench` draws through a stub canvas, so
+  every `fill` and `stroke` is a function call that records its argument and returns. That is a fine
+  measure of culling and of the renderer's own loops, and no measure at all of the thing that
+  actually costs — handing a hundred thousand path points to a rasteriser. It reported a street-level
+  frame at 1.0 ms while a browser spent 46 on it. When a rendering number looks too good, ask what is
+  on the other side of the call.
+- **A stroke is not a fill.** In Firefox, stroking a path costs about six times filling the same one:
+  the same 70,000-point outline was 105 ms stroked as the casing and 17 ms filled as the asphalt.
+  Anything drawn as a wide stroke over the whole network is the first place to look.
 - **A cost that scales with the network, not the traffic.** `npm run bench` runs one synthetic
   network of a fixed size, so it cannot see one: the tick was 0.4 ms on a two-mile import and 47 ms
   on a four-mile one, with the same few hundred vehicles on it. It was `retarget` asking every portal

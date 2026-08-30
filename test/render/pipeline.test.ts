@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { installCanvasGlobals, StubCanvas, StubContext } from '../helpers/canvasStub';
+import { installCanvasGlobals, StubCanvas, StubContext, callsSince, type DrawCall } from '../helpers/canvasStub';
 installCanvasGlobals();
 
 import { Renderer } from '@render/renderer';
@@ -20,13 +20,21 @@ import { DEFAULT_TERRAIN } from '@core/network/types';
 function setup() {
   const model = createDemoDocument();
   const net = compile(model);
+  // Everything this renderer draws with, including the offscreen the static layer
+  // makes for itself, is created from here on.
+  const mark = StubContext.instances.length;
   const canvas = new StubCanvas();
   const renderer = new Renderer(canvas as unknown as HTMLCanvasElement);
   renderer.camera.fit(net.bounds, 60);
   const paths = new NetworkPaths(net);
   const sim = new Simulation(net, { seed: 3, demandScale: 1 });
   sim.run(60);
-  return { model, net, canvas, renderer, paths, sim, ctx: canvas.context as unknown as StubContext };
+  return {
+    model, net, canvas, renderer, paths, sim,
+    ctx: canvas.context as unknown as StubContext,
+    /** Every call this renderer made, on whichever canvas it made it. */
+    calls: (): DrawCall[] => callsSince(mark),
+  };
 }
 
 function frame(s: ReturnType<typeof setup>, overrides: Partial<Parameters<Renderer['render']>[0]> = {}) {
@@ -82,43 +90,43 @@ describe('render pipeline', () => {
   });
 
   it('drops lane markings when zoomed out', () => {
-    const dashCalls = (ctx: StubContext): number =>
-      ctx.calls.filter((c) => c.op === 'setLineDash' && (c.args[0] as number[]).length > 0).length;
+    const dashCalls = (calls: DrawCall[]): number =>
+      calls.filter((c) => c.op === 'setLineDash' && (c.args[0] as number[]).length > 0).length;
 
     const close = setup();
     close.renderer.camera.zoom = 3;
     frame(close);
-    expect(dashCalls(close.ctx)).toBeGreaterThan(0);
+    expect(dashCalls(close.calls())).toBeGreaterThan(0);
 
     const far = setup();
     far.renderer.camera.zoom = 0.05;
     frame(far);
-    expect(dashCalls(far.ctx)).toBe(0);
+    expect(dashCalls(far.calls())).toBe(0);
   });
 
   it('paints arrows and word markings only where they can be read', () => {
-    const words = (ctx: StubContext): number => ctx.calls.filter((c) => c.op === 'fillText').length;
+    const words = (calls: DrawCall[]): number => calls.filter((c) => c.op === 'fillText').length;
 
     const close = setup();
     close.renderer.camera.zoom = 3;
     close.renderer.camera.x = -710;
     close.renderer.camera.y = 527;
     frame(close);
-    expect(words(close.ctx)).toBeGreaterThan(0);
+    expect(words(close.calls())).toBeGreaterThan(0);
     // Word markings are stretched along the lane, never drawn square.
-    const scales = close.ctx.calls.filter((c) => c.op === 'scale');
+    const scales = close.calls().filter((c) => c.op === 'scale');
     expect(scales.length).toBeGreaterThan(0);
     for (const c of scales) expect(c.args[0]).not.toBe(c.args[1]);
 
     const far = setup();
     far.renderer.camera.zoom = 0.4;
     frame(far);
-    expect(words(far.ctx)).toBe(0);
+    expect(words(far.calls())).toBe(0);
   });
 
   it('stretches the dash pattern so dashes stay visible zooming out', () => {
-    const dashLength = (ctx: StubContext): number => {
-      const call = ctx.calls.find(
+    const dashLength = (calls: DrawCall[]): number => {
+      const call = calls.find(
         (c) => c.op === 'setLineDash' && (c.args[0] as number[]).length === 2,
       );
       return call ? (call.args[0] as number[])[0]! : 0;
@@ -129,13 +137,13 @@ describe('render pipeline', () => {
     const close = setup();
     close.renderer.camera.zoom = 3;
     frame(close);
-    const near = dashLength(close.ctx);
+    const near = dashLength(close.calls());
     expect(near).toBeGreaterThan(0);
 
     const far = setup();
     far.renderer.camera.zoom = 0.25;
     frame(far);
-    const away = dashLength(far.ctx);
+    const away = dashLength(far.calls());
     expect(away).toBeGreaterThan(near);
     // Whatever the zoom, a dash stays at least a couple of pixels long.
     expect(away * 0.25).toBeGreaterThanOrEqual(2);

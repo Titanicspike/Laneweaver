@@ -11,6 +11,7 @@ import type { Junction, Lane, Marking, Network, RoadSymbol, Segment } from '../c
 import { TurnKind } from '../core/network/types';
 import { LaneKind } from '../core/network/types';
 import { bboxOfPolyline, expandBbox, samplePosition, sampleTangent, type Bbox } from '../core/geom/polyline';
+import { markKept, simplifyPolyline } from '../core/geom/fit';
 import { WIDTHS } from './theme';
 import { Mulberry32 } from '../core/util/rng';
 import { pavement, planBuildings, ROOF_COLOURS, type Plot } from './buildings';
@@ -136,6 +137,66 @@ function makeTile(grade: number, gx: number, gy: number): Tile {
  * with ours. Normalising the orientation is what makes the overlap merge instead
  * of punching through to the background.
  */
+/**
+ * How far a baked path may stray from the geometry it was compiled from, in metres.
+ *
+ * The compiler flattens to 0.15 m and then caps a flattened segment at 20 m so the
+ * R-tree boxes stay tight, and the offsetter emits a point wherever its source had
+ * one. The result is a straight road carrying a vertex every couple of metres that
+ * says nothing: on a two-mile import the surface rings come to 142,000 points, and
+ * **four fifths of them are exactly collinear**. Stroking and filling that, twice
+ * over per frame, was 128 ms of a 268 ms frame — the single largest cost in the
+ * renderer and all of it redundant.
+ *
+ * A centimetre is a quarter of a pixel at `MAX_ZOOM`, so nothing it removes could
+ * ever have been seen. It is deliberately *not* a level-of-detail tolerance keyed to
+ * zoom: this geometry is not needed at any zoom, and one baked path that is right
+ * everywhere beats two that have to be chosen between.
+ */
+const BAKE_TOLERANCE = 0.01;
+
+/**
+ * A ring simplified for drawing, with its split index moved with it.
+ *
+ * The two runs either side of the split are simplified separately, so the corners
+ * of the end caps survive exactly: simplifying across the join would cut them off.
+ *
+ * Only the *shape* is simplified, and only the shape may be. The shadow is grown
+ * from a per-point height, and a straight bridge deck is geometrically two points —
+ * so simplifying the ring the shadow is built from throws away every point that
+ * carried the climb, and the shadow comes out half height at both ends and flat in
+ * between, which is the opposite of a road going over something. The shadow keeps
+ * the compiled ring; it costs about a millisecond a frame because only a raised
+ * segment casts one at all.
+ */
+interface DrawRing {
+  points: Float32Array;
+  split: number;
+}
+
+function simplifyRing(ring: Float32Array, split: number): DrawRing {
+  const n = ring.length >> 1;
+  if (n < 4) return { points: ring, split };
+  const keep = new Uint8Array(n);
+  const cut = split > 1 && split < n - 1 ? split : n;
+  markKept(ring, 0, cut - 1, BAKE_TOLERANCE, keep);
+  if (cut < n) markKept(ring, cut, n - 1, BAKE_TOLERANCE, keep);
+
+  let kept = 0;
+  for (let i = 0; i < n; i++) kept += keep[i];
+  const points = new Float32Array(kept * 2);
+  let at = 0;
+  let newSplit = cut < n ? 0 : split;
+  for (let i = 0; i < n; i++) {
+    if (!keep[i]) continue;
+    if (cut < n && i === cut) newSplit = at;
+    points[at * 2] = ring[i * 2];
+    points[at * 2 + 1] = ring[i * 2 + 1];
+    at++;
+  }
+  return { points, split: newSplit };
+}
+
 function addPolygon(path: Path2D, points: ArrayLike<number>): void {
   const n = points.length >> 1;
   if (n < 3) return;
@@ -275,13 +336,19 @@ function addArrow(path: Path2D, symbol: RoadSymbol): void {
 }
 
 function addMarking(tile: Tile, marking: Marking): void {
+  // Paint is offset from a lane centreline and inherits its vertices, so it is as
+  // over-dense as the surface is: three quarters of a marking's points are exactly
+  // collinear. A zebra is short bars whose corners are the whole shape, so it is
+  // left alone.
+  const points = marking.style === 'zebra'
+    ? marking.points : simplifyPolyline(marking.points, BAKE_TOLERANCE);
   switch (marking.style) {
-    case 'dashed': addPolyline(tile.dashed, marking.points); break;
-    case 'solid': addPolyline(tile.solid, marking.points); break;
-    case 'double': addPolyline(tile.double, marking.points); break;
-    case 'median': addPolyline(tile.median, marking.points); break;
-    case 'edge': addPolyline(tile.edge, marking.points); break;
-    case 'zebra': addPolyline(tile.zebra, marking.points); break;
+    case 'dashed': addPolyline(tile.dashed, points); break;
+    case 'solid': addPolyline(tile.solid, points); break;
+    case 'double': addPolyline(tile.double, points); break;
+    case 'median': addPolyline(tile.median, points); break;
+    case 'edge': addPolyline(tile.edge, points); break;
+    case 'zebra': addPolyline(tile.zebra, points); break;
   }
 }
 
@@ -291,6 +358,13 @@ const _t = { x: 0, y: 0 };
 export class NetworkPaths {
   /** Distinct grades present, ascending, so stacks draw bottom-up. */
   readonly grades: number[] = [];
+
+  /**
+   * Bumped whenever the baked picture changes, which during decoration is most
+   * frames. Anything keeping a copy of the picture — see `StaticLayer` — has to be
+   * able to tell that the houses have moved on without diffing the paths.
+   */
+  version = 0;
   private readonly tiles = new Map<string, Tile>();
   private readonly scratch: Tile[] = [];
 
@@ -364,7 +438,7 @@ export class NetworkPaths {
       if (junction.footprint.length >= 6) {
         const tile = this.tileFor(junction.grade, junction.x, junction.y);
         addPolygon(tile.asphalt, junction.footprint);
-        addPolygon(tile.casing, junction.footprint);
+        addPolygon(tile.casing, simplifyPolyline(junction.footprint, BAKE_TOLERANCE));
         addShadow(tile.shadow, junction.footprint, junction.grade);
         // A gore's asphalt joins two carriageways whose markings both run through
         // it; only a crossing box hides what is underneath.
@@ -417,8 +491,11 @@ export class NetworkPaths {
     tile.bounds.maxX = Math.max(tile.bounds.maxX, box.maxX);
     tile.bounds.maxY = Math.max(tile.bounds.maxY, box.maxY);
 
-    addPolygon(tile.asphalt, segment.surface);
-    addCasing(tile.casing, net, segment);
+    // Once per segment: all four of these want the same ring, and simplifying it is
+    // most of what makes a frame affordable (see `BAKE_TOLERANCE`).
+    const ring = simplifyRing(segment.surface, segment.surfaceSplit);
+    addPolygon(tile.asphalt, ring.points);
+    addCasing(tile.casing, net, segment, ring);
     addShadow(tile.shadow, segment.surface, segment.surfaceHeight);
     addShadow(tile.shadowFar, segment.surface, segment.surfaceHeight, SHADOW_SPREAD);
 
@@ -450,6 +527,7 @@ export class NetworkPaths {
   decorate(budgetMs = Infinity): boolean {
     const work = this.pending;
     if (!work) return true;
+    this.version++;
     const started = budgetMs === Infinity ? 0 : performance.now();
     if (!work.buildings || !work.clear) {
       // One pavement index for both jobs: a tree in the carriageway and a house in
@@ -709,10 +787,10 @@ function capContinues(net: Network, segment: Segment, atEnd: boolean): boolean {
  * ring. Dropping an edge from a closed ring leaves an open run starting just after
  * it; dropping both leaves the two edges on their own.
  */
-function addCasing(path: Path2D, net: Network, segment: Segment): void {
-  const ring = segment.surface;
+function addCasing(path: Path2D, net: Network, segment: Segment, drawn: DrawRing): void {
+  const ring = drawn.points;
   const n = ring.length >> 1;
-  const rn = segment.surfaceSplit;
+  const rn = drawn.split;
   if (n < 3 || rn < 2 || rn > n - 2) {
     addPolygon(path, ring);
     return;

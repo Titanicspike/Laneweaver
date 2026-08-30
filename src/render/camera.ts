@@ -49,14 +49,26 @@ export class Camera {
     return (py - this.height / 2) / this.zoom + this.y;
   }
 
-  /** Sets the canvas transform so drawing can happen in world units. */
+  /**
+   * Sets the canvas transform so drawing can happen in world units.
+   *
+   * The translation is snapped to whole device pixels. Half a pixel of pan is not
+   * something anybody can see, and the snapping is what lets a cached bitmap of the
+   * static picture be blitted at an integer offset — unsnapped, every pan frame
+   * would resample the whole thing and the map would go soft as it moved.
+   */
   applyTo(ctx: CanvasRenderingContext2D): void {
     const s = this.zoom * this.devicePixelRatio;
-    ctx.setTransform(
-      s, 0, 0, s,
-      (this.width / 2 - this.x * this.zoom) * this.devicePixelRatio,
-      (this.height / 2 - this.y * this.zoom) * this.devicePixelRatio,
-    );
+    ctx.setTransform(s, 0, 0, s, this.originX(), this.originY());
+  }
+
+  /** Device-pixel position of world (0, 0), snapped. */
+  originX(): number {
+    return Math.round((this.width / 2 - this.x * this.zoom) * this.devicePixelRatio);
+  }
+
+  originY(): number {
+    return Math.round((this.height / 2 - this.y * this.zoom) * this.devicePixelRatio);
   }
 
   /** World-space rectangle currently visible, optionally padded in metres. */
