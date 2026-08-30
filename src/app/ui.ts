@@ -65,6 +65,7 @@ export interface AppApi {
 }
 
 import { MAX_MILES } from './osmImport';
+import { stepGrade } from '../editor/grade';
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.round(Math.max(lo, Math.min(hi, v)) * 1000) / 1000;
@@ -258,12 +259,26 @@ export class Ui {
       tools.append(button);
     }
 
+    // Three buttons, but a level is not three-valued: a bridge over a bridge is
+    // level 2. Ground resets, and Bridge/Tunnel step one level further in their own
+    // direction each time — so the deeper stacks are reachable with the mouse as
+    // well as with Tab, and the button says which level you are on.
     const grades = el('div', { class: 'row', style: { marginTop: '8px' } });
-    for (const [grade, label] of [[-1, 'Tunnel'], [0, 'Ground'], [1, 'Bridge']] as [number, string][]) {
+    for (const [dir, label] of [[-1, 'Tunnel'], [0, 'Ground'], [1, 'Bridge']] as [number, string][]) {
       const button = el('button', {
-        class: 'grow', text: label, onclick: () => this.app.setGrade(grade),
+        class: 'grow',
+        text: label,
+        title: dir === 0 ? 'Back to ground level'
+          : `${label} — click again to go one level further (Tab / Shift+Tab)`,
+        onclick: () => {
+          const now = this.app.activeGrade;
+          // Coming from the other side of the ground, the first click means "make it
+          // a bridge", not "one step from where the tunnel was".
+          this.app.setGrade(dir === 0 ? 0
+            : Math.sign(now) === dir ? stepGrade(now, dir) : dir);
+        },
       }) as HTMLButtonElement;
-      this.gradeButtons.set(grade, button);
+      this.gradeButtons.set(dir, button);
       grades.append(button);
     }
 
@@ -467,7 +482,16 @@ export class Ui {
   refresh(): void {
     const { store } = this.app;
     for (const [id, button] of this.toolButtons) button.classList.toggle('active', id === this.app.activeToolId);
-    for (const [grade, button] of this.gradeButtons) button.classList.toggle('active', grade === this.app.activeGrade);
+    const level = this.app.activeGrade;
+    for (const [dir, button] of this.gradeButtons) {
+      button.classList.toggle('active', dir === 0 ? level === 0 : Math.sign(level) === dir);
+      // The number only appears once there is more than one level in that direction,
+      // because on almost every document there is not and a "1" there is noise.
+      const deep = Math.sign(level) === dir && Math.abs(level) > 1;
+      button.textContent = deep
+        ? `${dir > 0 ? 'Bridge' : 'Tunnel'} ${Math.abs(level)}`
+        : dir > 0 ? 'Bridge' : dir < 0 ? 'Tunnel' : 'Ground';
+    }
     // The grade row belongs to drawing and the zone row to zoning; showing both at
     // once asks the reader to work out which one the current tool listens to.
     const zoning = this.app.activeToolId === 'zone';

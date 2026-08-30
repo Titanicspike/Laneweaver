@@ -65,6 +65,13 @@ export interface Tile {
    */
   shadow: Path2D;
   shadowFar: Path2D;
+  /**
+   * Made ground either side of a road that is climbing or falling — an embankment on
+   * the way up, a cutting on the way down — and the hachures across it. See
+   * `addEarthwork`.
+   */
+  earthwork: Path2D;
+  slope: Path2D;
   /** Verge planting: crowns, then the lighter side of each one. */
   trees: Path2D;
   treeTops: Path2D;
@@ -115,6 +122,8 @@ function makeTile(grade: number, gx: number, gy: number): Tile {
     words: [],
     shadow: new Path2D(),
     shadowFar: new Path2D(),
+    earthwork: new Path2D(),
+    slope: new Path2D(),
     trees: new Path2D(),
     treeTops: new Path2D(),
     plotGround: new Path2D(),
@@ -498,6 +507,8 @@ export class NetworkPaths {
     addCasing(tile.casing, net, segment, ring);
     addShadow(tile.shadow, segment.surface, segment.surfaceHeight);
     addShadow(tile.shadowFar, segment.surface, segment.surfaceHeight, SHADOW_SPREAD);
+    addEarthwork(tile.earthwork, tile.slope, segment.surface, segment.surfaceHeight,
+      segment.surfaceSplit);
 
     for (const marking of segment.markings) addMarking(tile, marking);
     for (const symbol of segment.symbols) {
@@ -847,6 +858,190 @@ const STACK_COMPRESSION = 0.45;
 
 function shadowHeight(h: number): number {
   return h <= 1 ? h : 1 + (h - 1) * STACK_COMPRESSION;
+}
+
+/**
+ * How a slope is drawn: earthworks.
+ *
+ * The shadow says how *high* a road is, and it does that well. What it cannot say is
+ * that the road is *changing* height — a shadow that grows along a ramp still reads,
+ * at a glance, as a road that happens to be higher at one end. Everything else about
+ * a change of level is a step: the parapet switches on at the half-level where the
+ * segment splits, and so does the tunnel alpha, however gradual the ramp underneath.
+ *
+ * So the ground is drawn. A road that climbs is on an embankment and a road that
+ * descends is in a cutting, and from above both are a band of made ground either side
+ * of the carriageway, widening as the road gets further from the level of everything
+ * around it. That is a real thing that is really there, it is continuous by
+ * construction, and it is legible as a *shape* at map zoom where a line would be
+ * sub-pixel. Hachures across the band — the convention every survey map uses — carry
+ * it close up, and point down the slope: outward off an embankment, inward into a
+ * cutting.
+ *
+ * Only where the road is actually sloping. A deck spanning on piers has no earthwork
+ * under it, and the band stopping at the abutment is the point: that is where the
+ * bridge begins, which nothing else in the picture says.
+ */
+const SLOPE_TICK_SPACING = 7;
+
+/** How far the short hachure of each pair reaches, as a fraction of the long one. */
+const HACHURE_SHORT = 0.5;
+
+/** How broad a hachure is at the top of the slope, before it tapers to a point. */
+const HACHURE_WIDTH = 1.1;
+
+/** How far the made ground reaches from the kerb at one level of height. */
+const EARTHWORK_PER_LEVEL = 5;
+
+/**
+ * Below this much height gained per metre travelled, a road is not sloping.
+ *
+ * Height is in *levels*, not metres, and how fast a road climbs one is up to whoever
+ * drew it: the importer ramps over a fixed 45 m (0.022 a metre), and a hand-drawn
+ * road ramps over however far apart its control points are — a quarter of a
+ * two-kilometre road is 0.003. The floor has to sit under the gentlest of those, and
+ * it can, because a level run is *exactly* level: heights are interpolated from the
+ * control points, so a flat deck's gradient is zero rather than nearly zero and there
+ * is no drift to exclude.
+ *
+ * It was 0.004 first, which is above a hand-drawn ramp and below an imported one — so
+ * it drew nothing at all on the case built to show it off.
+ */
+const SLOPE_MIN_GRADIENT = 2e-4;
+
+/** Narrower than this the band is a smudge, so that stretch is left bare. */
+const EARTHWORK_MIN = 0.4;
+
+/**
+ * The made ground either side of a segment, wherever it is climbing or falling.
+ *
+ * The surface ring is the two edges back to back — `split` is where it turns the
+ * corner — so each is walked on its own and the caps are skipped. Which way is
+ * "outward" comes from the ring's own winding rather than from an assumption about
+ * which edge is which: for a counter-clockwise ring the interior is on the left of
+ * travel, so the outward normal is on the right, and a clockwise ring is the mirror.
+ * Both edges then come out facing away from the road without having to know which is
+ * which.
+ */
+function addEarthwork(
+  band: Path2D, ticks: Path2D, ring: Float32Array, height: Float32Array, split: number,
+): void {
+  const n = ring.length >> 1;
+  if (n < 4 || split < 2 || split > n - 2 || height.length < n) return;
+
+  // Twice the signed area. Positive is counter-clockwise in the canvas's y-down
+  // world, so the sign convention is settled here once.
+  let area = 0;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    area += ring[i * 2] * ring[j * 2 + 1] - ring[j * 2] * ring[i * 2 + 1];
+  }
+  const hand = area > 0 ? 1 : -1;
+
+  for (const [from, to] of [[0, split], [split, n]] as [number, number][]) {
+    // Maximal runs of sloping edge. A run is one piece of embankment or cutting; the
+    // flat deck between two of them has no made ground under it at all.
+    let i = from;
+    while (i < to - 1) {
+      if (!sloping(ring, height, i)) { i++; continue; }
+      let j = i;
+      while (j < to - 1 && sloping(ring, height, j)) j++;
+      addEarthworkRun(band, ticks, ring, height, i, j, hand);
+      i = j + 1;
+    }
+  }
+}
+
+/** Whether the edge leaving vertex `i` gains enough height to be a slope. */
+function sloping(ring: Float32Array, height: Float32Array, i: number): boolean {
+  const dx = ring[(i + 1) * 2] - ring[i * 2];
+  const dy = ring[(i + 1) * 2 + 1] - ring[i * 2 + 1];
+  const len = Math.sqrt(dx * dx + dy * dy);
+  if (len < 1e-4) return false;
+  return Math.abs((height[i + 1] ?? 0) - (height[i] ?? 0)) / len >= SLOPE_MIN_GRADIENT;
+}
+
+/** One run of made ground: out along the toe of the slope, back along the kerb. */
+function addEarthworkRun(
+  band: Path2D, ticks: Path2D, ring: Float32Array, height: Float32Array,
+  from: number, to: number, hand: number,
+): void {
+  // Compressed above the first level the same way the shadow is: a level-three deck
+  // otherwise grows an apron wider than the road is, and what has to survive is that
+  // it is sloping, not how far.
+  const reach = (i: number): number =>
+    shadowHeight(Math.abs(height[i] ?? 0)) * EARTHWORK_PER_LEVEL;
+  if (reach(from) < EARTHWORK_MIN && reach(to) < EARTHWORK_MIN) return;
+
+  // The made ground is *outside* the carriageway either way: an embankment is fill
+  // heaped against the road and a cutting is ground left standing beside it. Putting
+  // a cutting's band on the inside — which is where "point down the slope" naively
+  // leads — buries the whole thing under the asphalt drawn on top of it, which is
+  // exactly how the first version drew nothing at all for a tunnel.
+  const nrm: [number, number] = [0, 0];
+  const normal = (i: number): void => {
+    const k = Math.min(i, to - 1);
+    const dx = ring[(k + 1) * 2] - ring[k * 2];
+    const dy = ring[(k + 1) * 2 + 1] - ring[k * 2 + 1];
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+    nrm[0] = (dy / len) * hand;
+    nrm[1] = (-dx / len) * hand;
+  };
+
+  // Out along the toe of the slope...
+  for (let i = from; i <= to; i++) {
+    normal(i);
+    const r = reach(i);
+    const x = ring[i * 2] + nrm[0] * r;
+    const y = ring[i * 2 + 1] + nrm[1] * r;
+    if (i === from) band.moveTo(x, y);
+    else band.lineTo(x, y);
+  }
+  // ...and back along the kerb, which closes the band against the road.
+  for (let i = to; i >= from; i--) band.lineTo(ring[i * 2], ring[i * 2 + 1]);
+  band.closePath();
+
+  // Which end of a hachure is the top of the slope, which is the only thing that
+  // says embankment from cutting: a road on fill is the high side, a road in a cut
+  // is the low one. A plain line cannot carry that — it looks the same drawn either
+  // way — so each hachure is a thin wedge, broad at the top and pointed at the
+  // bottom, which is how a survey map draws made ground and is readable at a glance.
+  const cutting = (height[(from + to) >> 1] ?? 0) < 0;
+
+  // Alternating long and short, because even ticks of one length read as sleepers —
+  // a railway, which is the one thing on a map this must not be mistaken for.
+  let since = SLOPE_TICK_SPACING;
+  let long = true;
+  for (let i = from; i <= to; i++) {
+    if (i > from) {
+      const dx = ring[i * 2] - ring[(i - 1) * 2];
+      const dy = ring[i * 2 + 1] - ring[(i - 1) * 2 + 1];
+      since += Math.sqrt(dx * dx + dy * dy);
+    }
+    if (since < SLOPE_TICK_SPACING) continue;
+    const full = reach(i);
+    if (full < EARTHWORK_MIN) continue;
+    const r = full * (long ? 1 : HACHURE_SHORT);
+    since = 0;
+    long = !long;
+    normal(i);
+
+    // Along the road, to give the wedge its width.
+    const tx = -nrm[1];
+    const ty = nrm[0];
+    const kerbX = ring[i * 2];
+    const kerbY = ring[i * 2 + 1];
+    // A short hachure hangs from the top of the slope rather than floating in the
+    // middle of the band, so the row of tops stays a line the eye can follow.
+    const topX = cutting ? kerbX + nrm[0] * full : kerbX;
+    const topY = cutting ? kerbY + nrm[1] * full : kerbY;
+    const dir = cutting ? -1 : 1;
+    const w = HACHURE_WIDTH * 0.5;
+    ticks.moveTo(topX + tx * w, topY + ty * w);
+    ticks.lineTo(topX - tx * w, topY - ty * w);
+    ticks.lineTo(topX + nrm[0] * r * dir, topY + nrm[1] * r * dir);
+    ticks.closePath();
+  }
 }
 
 /**

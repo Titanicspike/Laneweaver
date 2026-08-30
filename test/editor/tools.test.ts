@@ -8,6 +8,7 @@ import { installCanvasGlobals, StubContext } from '../helpers/canvasStub';
 installCanvasGlobals();
 
 import { harness } from '../helpers/editor';
+import { MAX_GRADE } from '@editor/grade';
 import { DrawTool } from '@editor/tools/drawTool';
 import { SelectTool } from '@editor/tools/selectTool';
 import { BulldozeTool } from '@editor/tools/bulldozeTool';
@@ -84,16 +85,44 @@ describe('draw tool', () => {
     expect(last.hiy).toBeCloseTo(-60, 3);
   });
 
-  it('cycles grade with Tab', () => {
+  it('raises the level with Tab and lowers it with Shift+Tab', () => {
+    // A level is not three-valued: a bridge over a bridge is level 2, and the old
+    // ground/bridge/tunnel cycle had nowhere to put it.
     const h = harness();
     const tool = new DrawTool();
     expect(h.env.activeGrade).toBe(0);
     h.key(tool, 'Tab');
     expect(h.env.activeGrade).toBe(1);
     h.key(tool, 'Tab');
-    expect(h.env.activeGrade).toBe(-1);
-    h.key(tool, 'Tab');
+    expect(h.env.activeGrade, 'a bridge over a bridge').toBe(2);
+    h.key(tool, 'Tab', { shiftKey: true });
+    h.key(tool, 'Tab', { shiftKey: true });
     expect(h.env.activeGrade).toBe(0);
+    h.key(tool, 'Tab', { shiftKey: true });
+    expect(h.env.activeGrade, 'and down into a tunnel').toBe(-1);
+  });
+
+  it('stops at the deepest level rather than wrapping round', () => {
+    // Wrapping would put a road that was meant to climb into a tunnel, silently.
+    const h = harness();
+    const tool = new DrawTool();
+    for (let i = 0; i < 8; i++) h.key(tool, 'Tab');
+    expect(h.env.activeGrade).toBe(MAX_GRADE);
+    for (let i = 0; i < 16; i++) h.key(tool, 'Tab', { shiftKey: true });
+    expect(h.env.activeGrade).toBe(-MAX_GRADE);
+  });
+
+  it('builds a road at a level above the first', () => {
+    const h = harness();
+    const tool = new DrawTool();
+    h.key(tool, 'Tab');
+    h.key(tool, 'Tab');
+    h.click(tool, 0, 0);
+    h.click(tool, 300, 0);
+    h.key(tool, 'Enter');
+    h.settle();
+    expect(h.store.model.strokes[0].points.every((p) => p.grade === 2)).toBe(true);
+    expect(h.store.network.segments.every((seg) => seg.grade === 2)).toBe(true);
   });
 
   it('builds the road at the level Tab left it on', () => {
@@ -116,8 +145,7 @@ describe('draw tool', () => {
     h.key(tool, 'Tab');
     h.click(tool, -100, 0);
     h.click(tool, 100, 0);
-    h.key(tool, 'Tab');
-    h.key(tool, 'Tab');
+    h.key(tool, 'Tab', { shiftKey: true });
     h.click(tool, 300, 0);
     h.key(tool, 'Enter');
     h.settle();
@@ -298,13 +326,17 @@ describe('select tool', () => {
     expect(h.store.model.strokes.length).toBe(1);
   });
 
-  it('cycles the selection between ground, bridge and tunnel', () => {
+  it('raises and lowers the selection a level at a time', () => {
     const h = withRoad();
     const select = new SelectTool();
     h.click(select, 150, 0);
     h.key(select, 'Tab');
     expect(h.store.model.strokes[0].points.every((p) => p.grade === 1)).toBe(true);
     h.key(select, 'Tab');
+    expect(h.store.model.strokes[0].points.every((p) => p.grade === 2)).toBe(true);
+    h.key(select, 'Tab', { shiftKey: true });
+    h.key(select, 'Tab', { shiftKey: true });
+    h.key(select, 'Tab', { shiftKey: true });
     expect(h.store.model.strokes[0].points.every((p) => p.grade === -1)).toBe(true);
   });
 

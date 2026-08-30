@@ -1226,6 +1226,35 @@ markings → signals) → vehicles (per grade) → editor overlays.
     and one bracket around both reported a 134 ms redraw as a slow `blit` — which sends you optimising
     the one that was already free. It is the same mistake as `blit` once being billed to `signals`.
   - Signals, vehicles, overlays, diagnostics and the grid are drawn live on top, every frame.
+- **A road that is changing level is drawn on made ground** (`addEarthwork`). The shadow says how
+  *high* a road is and does it well; what it could not say is that the road is *changing* height,
+  because a shadow that grows along a ramp still reads at a glance as a road that happens to be
+  higher at one end. Everything else about a transition is a step — the parapet switches on at the
+  half-level where the segment splits, and so does the tunnel alpha — however gradual the ramp
+  underneath, and "the change of level looks abrupt" was that step.
+
+  So the ground is drawn: a road that climbs is on an **embankment** and one that descends is in a
+  **cutting**, and from above both are a band of made ground either side of the carriageway,
+  widening as the road gets further from the level of everything around it. It is a real thing that
+  is really there, continuous by construction, and legible as a *shape* at map zoom where a line
+  would be sub-pixel. It exists only where the road is actually sloping: a deck spanning on piers
+  has no earthwork under it, and the band stopping is the **abutment**, which nothing else in the
+  picture said.
+  - **The band is outside the carriageway either way.** An embankment is fill heaped against the
+    road and a cutting is ground left standing beside it. Putting a cutting's band on the inside —
+    which is where "point down the slope" naively leads — buries the whole thing under the asphalt
+    drawn over it, and a tunnel then gets no cue at all.
+  - **Hachures across it are wedges, not ticks**, broad at the top of the slope and pointed at the
+    bottom. That taper is the *only* thing that says embankment from cutting: a plain tick looks
+    identical drawn either way. They alternate long and short, because even ticks of one length read
+    as sleepers — a railway, which is the one thing on a map this must not be mistaken for.
+  - **The gradient floor has to sit under a hand-drawn ramp, not an imported one.** Height is in
+    levels, not metres, and how fast a road climbs one is up to whoever drew it: the importer ramps
+    over a fixed 45 m (0.022 a metre) and a hand-drawn road over however far apart its control
+    points are — a quarter of a two-kilometre road is 0.003. It can sit far below both, because a
+    level run is *exactly* level: heights are interpolated from the control points, so there is no
+    drift to exclude. Set at 0.004 first, which is above a hand-drawn ramp and below an imported
+    one, it drew nothing at all on the case built to show it off.
 - Tunnels (grade < 0): dashed casing, fill and vehicles at ~40% alpha. Bridges (grade > 0): a
   **parapet** — lighter than the casing and wider — plus a two-layer drop shadow.
   - **Occlusion says which road is on top and nothing about why.** Without a shadow a stacked
@@ -1496,8 +1525,15 @@ markings → signals) → vehicles (per grade) → editor overlays.
   is right when zoomed out and useless when zoomed in: at street level it is half a metre, so
   pointing anywhere but the exact middle of a 3.5 m lane picks nothing at all. Half a lane with a
   pixel floor is what the eye expects.
-- **Grade is per control point.** Tab over a control point cycles that point between ground, bridge
-  and tunnel; Tab anywhere else cycles the whole selection. Leaving the neighbours where they are is
+- **Grade is per control point, and a level is not three-valued.** Tab raises the level and
+  Shift+Tab lowers it, capped at `MAX_GRADE` (3) either way rather than wrapping — over a control
+  point it moves that point, anywhere else the whole selection. It cycled ground → bridge → tunnel →
+  ground, which meant the only bridge you could draw was one level up: a bridge *over* a bridge was
+  compilable, and an OSM import built four-level stacks routinely, but nothing in the editor could
+  ask for one. The toolbar's Tunnel/Ground/Bridge buttons step in their own direction on each click
+  for the same reason, and the button reads `Bridge 2` once there is more than one level to tell
+  apart. Wrapping is what the cap replaces: a road meant to climb should not silently become a
+  tunnel. Leaving the neighbours where they are is
   what makes the road ramp, so one stroke can rise, cross something and come back down. While
   drawing, the active level is stamped on each point **as it is placed**, so Tab part way along a
   road is what makes that road climb — a stroke built entirely by the toolbar's Ground/Bridge/Tunnel
@@ -1548,6 +1584,7 @@ markings → signals) → vehicles (per grade) → editor overlays.
   XYZ template you supply.
 - Every mutation is a command. Ctrl+Z / Ctrl+Shift+Z from day one; one drag is one undo step.
 - Keys: V select, R draw, X bulldoze, J junctions, U underlay, Space run/pause, F fit, Ctrl+S save.
+  Tab raises the level, Shift+Tab lowers it.
 
 ## Save format
 
@@ -1756,7 +1793,7 @@ Roundabouts are the obvious next feature. None of it before merges are flawless.
 
 ## Testing strategy
 
-`npm test` runs 773 tests in about 140 s, all green; the merge suite is most of that and is worth
+`npm test` runs 779 tests in about 140 s, all green; the merge suite is most of that and is worth
 every second. The two that were long red — the at-grade priority crossing in
 `test/sim/committed-crossing.test.ts` — went green with `PRIORITY_MAX_SPEED`, which is to say the
 compiler stopped building the junction rather than the simulation learning to survive it.
@@ -1834,7 +1871,11 @@ compiler stopped building the junction rather than the simulation learning to su
   the two sides of an abutment agree on how high they are, the shadow is displaced by that height
   rather than by the layer, the casing draws no cap where the road carries on — and still draws one
   where it stops — and the renderer strokes the outline rather than the surface. Bridge and tunnel
-  both.
+  both. Earthworks are checked for the three things that are silent when they go wrong: a sloping
+  road has made ground beside it and a flat one has none, no part of it ever lies over the
+  carriageway (the cutting bug, which drew a band the asphalt then covered), and the hachures point
+  down the slope — outward off an embankment, inward into a cutting, which is the only thing telling
+  the two apart.
 - **Scenario regressions** (`test/scenarios/`): the merge suite above, a four-way priority junction,
   an all-way stop, a signalised arterial grid, and a five-way — where some destinations are simply
   not reachable from some approaches, and no vehicle may drive through another however busy it gets.
@@ -1932,7 +1973,7 @@ compiler stopped building the junction rather than the simulation learning to su
   is what found the zoning split brain.
 - **Visual verification** (`scratch/`, dev-only, not in `npm test`). Most defects this project has
   shipped were visual, and a screenshot at a time is not a way to find them. Three tools:
-  `scratch/cases.ts` is a zoo of ~38 documents — the five example maps included, because those are
+  `scratch/cases.ts` is a zoo of ~39 documents — the five example maps included, because those are
   the documents a user actually opens, so a fault in one of them is a fault the user sees first — — every ramp shape at one and two lanes into two,
   three and four-lane freeways, weaves, lane drops, a road that bridges over another and one that
   tunnels under it, crossings straight, skew, curved, wide-into-narrow and five-way, plus the demo
@@ -2242,6 +2283,12 @@ compiler stopped building the junction rather than the simulation learning to su
   pixel-diff comparisons against a freshly captured reference all returned zero differing pixels
   before the bug was found by dumping the cached bitmap itself. When a cache is suspected, look at
   what it holds, not at what it produces.
+- **A threshold calibrated on one source silently excludes the other.** The earthwork's "is this
+  road sloping" floor was set from the OSM importer's fixed 45 m level ramp, which is an order of
+  magnitude steeper than a hand-drawn one — so the feature drew nothing at all on the zoo case built
+  to demonstrate it, and looked like it had failed to run. Anything keyed on a rate rather than a
+  quantity wants checking against *both* the surveyed and the drawn document, because the two differ
+  by more than they look.
 - **A gesture is a window, not a difference between two frames.** `zooming` was
   `camera.zoom !== lastZoom`, which is true only on the frames a notch lands on. A wheel turns every
   30-60 ms against a 16 ms frame, so most frames of a gesture look identical to a settled one — and

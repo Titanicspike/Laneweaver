@@ -304,6 +304,29 @@ export class Renderer {
     }
     this.lap('shadow');
 
+    // Embankment hachures, wherever the road is climbing or falling. Under the
+    // casing, because they are earthworks rather than paint: the road has to read as
+    // sitting on top of them. They are the one cue that says the level is *changing*
+    // — the shadow says how high it is, and everything else about a transition (the
+    // parapet, the tunnel alpha) switches on at the half-level in one step, however
+    // gradual the ramp underneath.
+    {
+      const was = ctx.globalAlpha;
+      ctx.globalAlpha = 1;   // earthworks are ground, not part of a faded tunnel deck
+      ctx.fillStyle = theme.embankment;
+      for (const tile of tiles) ctx.fill(tile.earthwork);
+      // Hachures only once they are more than a smudge. The band carries the cue at
+      // map zoom; the ticks are what say which way the ground falls, close up.
+      if (camera.zoom >= LOD.trees) {
+        // Filled wedges rather than strokes: the taper is what says which way the
+        // ground falls, and a stroke of even width cannot say it at all.
+        ctx.fillStyle = theme.embankmentHachure;
+        for (const tile of tiles) ctx.fill(tile.slope);
+      }
+      ctx.globalAlpha = was;
+    }
+    this.lap('embankment');
+
     // Casing: stroke the road's edges, then fill over the inner half of the stroke.
     // The outline used here leaves out any end cap the road drives straight through,
     // because a cap is only an edge where the road actually stops.

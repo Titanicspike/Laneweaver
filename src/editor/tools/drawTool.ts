@@ -16,13 +16,15 @@ import type { Camera } from '../../render/camera';
 import type { Theme } from '../../render/theme';
 import { lineWidth } from '../../render/networkPaths';
 import { canBuildAt } from '../../core/terrain/constraints';
+import { levelName, stepGrade } from '../grade';
 
 const DRAG_PIXELS = 4;
 
 export class DrawTool implements Tool {
   readonly id = 'draw';
   readonly name = 'Draw road';
-  readonly hint = 'Click to place points, drag to curve. Enter finishes, Esc cancels, Tab cycles bridge/tunnel.';
+  readonly hint = 'Click to place points, drag to curve. Enter finishes, Esc cancels. '
+    + 'Tab raises the level, Shift+Tab lowers it — press it twice for a bridge over a bridge.';
   readonly cursor = 'crosshair';
 
   private points: ControlPoint[] = [];
@@ -114,9 +116,11 @@ export class DrawTool implements Tool {
       return true;
     }
     if (event.key === 'Tab') {
-      const next = env.activeGrade === 0 ? 1 : env.activeGrade === 1 ? -1 : 0;
+      // Up a level, or down with Shift. Not a three-state cycle: a bridge over a
+      // bridge is a level-2 bridge, and a cycle has nowhere to put it.
+      const next = stepGrade(env.activeGrade, event.shiftKey ? -1 : 1);
       env.setActiveGrade(next);
-      env.setStatus(next === 0 ? 'Ground level' : next > 0 ? 'Bridge' : 'Tunnel');
+      env.setStatus(levelName(next));
       env.requestRender();
       return true;
     }

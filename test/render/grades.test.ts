@@ -108,10 +108,27 @@ function drawsACapAt(runs: Subpath[], segment: Segment, atEnd: boolean): boolean
 }
 
 /** Every subpath of one layer, across however many tiles the road is bucketed into. */
-function layer(paths: NetworkPaths, grade: number, which: 'casing' | 'shadow'): Subpath[] {
+function layer(
+  paths: NetworkPaths, grade: number, which: 'casing' | 'shadow' | 'earthwork' | 'slope',
+): Subpath[] {
   const tiles = paths.query(grade, WORLD);
   expect(tiles.length).toBeGreaterThan(0);
   return tiles.flatMap((tile) => subpaths(tile[which]));
+}
+
+
+/**
+ * How far the carriageway itself reaches from the fixture's axis, which is x = 0.
+ *
+ * Taken from the compiled surface rather than added up from the profile, so the test
+ * keeps meaning the same thing if a shoulder or a median changes.
+ */
+function halfWidth(net: Network): number {
+  let w = 0;
+  for (const seg of net.segments) {
+    for (let i = 0; i < seg.surface.length; i += 2) w = Math.max(w, Math.abs(seg.surface[i]!));
+  }
+  return w;
 }
 
 /**
@@ -295,5 +312,67 @@ describe('a road that changes level', () => {
     expect(drawsACapAt(casing, bore, true)).toBe(false);
     // Nothing above a tunnel is in its shadow.
     expect(layer(paths, -1, 'shadow').length).toBe(0);
+  });
+});
+
+describe('earthworks', () => {
+  // The shadow says how high a road is. What it could not say is that the road is
+  // *changing* height: everything else about a transition — the parapet, the tunnel
+  // alpha — switches on at the half-level in one step, however gradual the ramp
+  // underneath, and "the change of level looks abrupt" was that step.
+  it('puts made ground beside a road that is climbing, and none beside a flat one', () => {
+    const climbing = layer(new NetworkPaths(overpass(1)), 0, 'earthwork');
+    expect(climbing.length, 'a ramp is on an embankment').toBeGreaterThan(0);
+
+    // Every grade of the same road: the flat deck in the middle spans on piers and
+    // has no earthwork under it at all, which is what makes the band's end read as
+    // the abutment.
+    const flat = new NetworkPaths(overpass(0));
+    expect(layer(flat, 0, 'earthwork').length, 'a road on the ground is not sloping').toBe(0);
+  });
+
+  it('never lays made ground over the carriageway', () => {
+    // The same rule as trees and houses: anything placed beside a road is tested
+    // against the road. A cutting is the case that gets this wrong, because "point
+    // down the slope" leads naively to a band on the inside — which the asphalt then
+    // draws straight over, so the tunnel got no cue at all.
+    for (const grade of [1, -1]) {
+      const net = overpass(grade);
+      const edge = halfWidth(net);
+      const paths = new NetworkPaths(net);
+      for (const sub of [...layer(paths, 0, 'earthwork'), ...layer(paths, 0, 'slope')]) {
+        for (let i = 0; i < sub.points.length; i += 2) {
+          expect(Math.abs(sub.points[i]!),
+            `grade ${grade}: made ground ${Math.abs(sub.points[i]!).toFixed(2)} m from the axis, `
+            + `inside a carriageway reaching ${edge.toFixed(2)} m`).toBeGreaterThan(edge - 0.1);
+        }
+      }
+    }
+  });
+
+  it('points its hachures down the slope, which is the only thing that says which', () => {
+    // An embankment falls away from the road and a cutting falls toward it. A plain
+    // tick cannot carry that — it looks the same drawn either way — so each hachure
+    // is a wedge, broad at the top of the slope and pointed at the bottom. These
+    // assertions are the difference between the two being legible and being identical.
+    for (const [grade, name] of [[1, 'embankment'], [-1, 'cutting']] as [number, string][]) {
+      const wedges = layer(new NetworkPaths(overpass(grade)), 0, 'slope');
+      expect(wedges.length, `${name}: some hachures`).toBeGreaterThan(4);
+      let checked = 0;
+      for (const w of wedges) {
+        if (w.points.length < 6) continue;
+        const baseMid = Math.abs((w.points[0]! + w.points[2]!) / 2);
+        const apex = Math.abs(w.points[4]!);
+        if (grade > 0) {
+          expect(apex, `${name}: the point is the low side, away from the road`)
+            .toBeGreaterThan(baseMid);
+        } else {
+          expect(apex, `${name}: the point is the low side, toward the road`)
+            .toBeLessThan(baseMid);
+        }
+        checked++;
+      }
+      expect(checked, `${name}: wedges actually tested`).toBeGreaterThan(4);
+    }
   });
 });

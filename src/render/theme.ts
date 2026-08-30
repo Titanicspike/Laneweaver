@@ -30,6 +30,14 @@ export interface Theme {
    * road is on top and nothing about why.
    */
   bridgeParapet: string;
+  /**
+   * Embankment hachures down the side of a road that is climbing or falling. Between
+   * the casing and the ground: they are earthworks, so they must read as *under* the
+   * road rather than as another line painted on it.
+   */
+  embankment: string;
+  /** The hachures across it: lighter than the ground, so the slope reads close up. */
+  embankmentHachure: string;
   tunnelAlpha: number;
 
   treeCrown: string;
@@ -110,6 +118,8 @@ export const DARK: Theme = {
 
   bridgeShadow: '#050608',
   bridgeParapet: '#5a6069',
+  embankment: '#282d35',
+  embankmentHachure: '#4a515c',
   tunnelAlpha: 0.4,
 
   treeCrown: '#2c4232',
@@ -190,6 +200,8 @@ export const LOD = {
 export const WIDTHS = {
   /** Casing width added either side of the asphalt, metres. */
   casing: 0.55,
+  /** One hachure. Thinner than the casing, or the ticks read as little roads. */
+  embankment: 0.34,
   /** The parapet along a raised deck: wider than the casing, so it reads as built. */
   parapet: 0.95,
   laneMarking: 0.14,

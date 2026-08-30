@@ -253,6 +253,20 @@ export function cases(): Case[] {
     const s = add(m, a, line(0, -600, 0, 600, 4));
     [0, -1, -1, 0].forEach((g, i) => { s.points[i]!.grade = g; });
   }, [0, 0], 2.2);
+  // Three roads over one another, which is what the editor could not draw until Tab
+  // meant "up a level" rather than cycling ground/bridge/tunnel. It is also the case
+  // the slope hachures exist for: three ramps at three heights in one picture, where
+  // a cue that only says "high" cannot tell them apart.
+  make('grade-stack-three', (m) => {
+    const a = arterial(m, 2.4);
+    add(m, freeway(m, 3), line(-900, 0, 900, 0, 3));
+    const one = add(m, a, line(0, -700, 0, 700, 5));
+    [0, 1, 1, 1, 0].forEach((g, i) => { one.points[i]!.grade = g; });
+    const two = add(m, a, line(-700, -500, 700, 500, 5));
+    [0, 2, 2, 2, 0].forEach((g, i) => { two.points[i]!.grade = g; });
+    const three = add(m, a, line(-700, 500, 700, -500, 5));
+    [0, 3, 3, 3, 0].forEach((g, i) => { three.points[i]!.grade = g; });
+  }, [0, 0], 2.2);
   // Junctions that are awkward on purpose: this is where an arm grown a little too
   // long shows up as asphalt hanging off the far side of the box.
   make('tee-skew-35', (m) => {

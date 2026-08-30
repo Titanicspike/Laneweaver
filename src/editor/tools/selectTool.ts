@@ -15,6 +15,7 @@ import type { PointerInfo, Tool, ToolEnv } from '../tool';
 import type { Camera } from '../../render/camera';
 import type { Theme } from '../../render/theme';
 import { lineWidth } from '../../render/networkPaths';
+import { levelName, stepGrade } from '../grade';
 
 type Grab =
   | { kind: 'none' }
@@ -30,7 +31,8 @@ export class SelectTool implements Tool {
   readonly hint =
     'Click to select, drag points or handles to reshape. Alt-click adds a point — on the road to '
     + 'get another handle, off it to take the road there. Alt-click a point to remove it. ' +
-    'Delete removes the road; Tab cycles bridge/tunnel for the road, or for one point under the cursor.';
+    'Delete removes the road; Tab raises the level and Shift+Tab lowers it, for the road or for '
+    + 'one point under the cursor.';
   readonly cursor = 'default';
 
   private grab: Grab = { kind: 'none' };
@@ -273,7 +275,9 @@ export class SelectTool implements Tool {
       return true;
     }
     if (event.key === 'Tab') {
-      const cycle = (g: number): number => (g === 0 ? 1 : g === 1 ? -1 : 0);
+      // Up a level, or down with Shift, rather than a three-state cycle: a bridge
+      // over a bridge is level 2, and a cycle has nowhere to put it.
+      const dir = event.shiftKey ? -1 : 1;
       // Over a control point, Tab moves that point: leave its neighbours where they
       // are and the road ramps between them. Otherwise it moves the whole road.
       const at = this.hover?.part === 'point' ? this.hover : null;
@@ -281,14 +285,17 @@ export class SelectTool implements Tool {
         const stroke = store.model.strokes.find((s) => s.id === at.strokeId);
         const point = stroke?.points[at.index];
         if (point) {
-          store.run(setPointGrade(at.strokeId, at.index, cycle(Math.round(point.grade))));
+          const next = stepGrade(point.grade, dir);
+          store.run(setPointGrade(at.strokeId, at.index, next));
+          env.setStatus(levelName(next));
           env.requestRender();
           return true;
         }
       }
       const first = store.model.strokes.find((s) => store.selection.has(s.id));
-      const grade = first ? cycle(Math.round(first.points[0]?.grade ?? 0)) : 0;
+      const grade = first ? stepGrade(first.points[0]?.grade ?? 0, dir) : 0;
       store.run(setStrokeGrade([...store.selection], grade));
+      env.setStatus(levelName(grade));
       env.requestRender();
       return true;
     }

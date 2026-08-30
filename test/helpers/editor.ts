@@ -14,7 +14,7 @@ export interface Harness {
   /** A drag that visits every point in turn, for tools that paint along a path. */
   paint(tool: Tool, points: [number, number][], opts?: Partial<PointerInfo>): void;
   move(tool: Tool, x: number, y: number, opts?: Partial<PointerInfo>): void;
-  key(tool: Tool, key: string): boolean;
+  key(tool: Tool, key: string, mods?: { shiftKey?: boolean; altKey?: boolean }): boolean;
   /** Applies pending edits so the network and geometry are up to date. */
   settle(): void;
 }
@@ -78,8 +78,10 @@ export function harness(model?: EditModel): Harness {
       tool.pointerUp?.(info(last[0], last[1], opts), env);
       store.endEdit();
     },
-    key(tool, key) {
-      const event = { key, preventDefault(): void {} } as KeyboardEvent;
+    key(tool, key, mods) {
+      const event = {
+        key, shiftKey: false, altKey: false, ...mods, preventDefault(): void {},
+      } as KeyboardEvent;
       return tool.key?.(event, env) ?? false;
     },
   };
