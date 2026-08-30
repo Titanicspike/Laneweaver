@@ -15,6 +15,7 @@
 import { compile } from '../src/core/network/compiler';
 import { NetworkPaths } from '../src/render/networkPaths';
 import { Renderer } from '../src/render/renderer';
+import { Simulation } from '../src/core/sim/sim';
 import { cases } from './cases';
 import type { EditModel } from '../src/core/network/types';
 
@@ -27,9 +28,18 @@ const ZOOMS = (params.get('zooms') ?? '0.08,0.16,0.3,0.45,0.9,2')
 const PAN = params.get('pan') === '1';
 /** Change the zoom a little each frame, which is what a wheel gesture does. */
 const ZOOMING = params.get('zooming') === '1';
+/**
+ * Frames between wheel notches. A real wheel does not move every frame: notches
+ * arrive every 30-60 ms against a 16 ms frame, so most frames of a gesture see an
+ * unchanged zoom. Whether the renderer treats those as "the gesture is over" is the
+ * difference between one redraw per gesture and one per notch.
+ */
+const NOTCH = Math.max(1, Number(params.get('notch') ?? 1));
 const FRAMES = Number(params.get('frames') ?? 45);
 /** Viewports of pan per second. One is a normal drag; ten forces a redraw a frame. */
 const SPEED = Number(params.get('speed') ?? 0.33);
+/** Simulated seconds to run before measuring, so the frames carry real traffic. */
+const WARM = Number(params.get('sim') ?? 0);
 
 function say(line: string): void {
   out.textContent = `${out.textContent}\n${line}`.trim();
@@ -70,14 +80,36 @@ async function main(): Promise<void> {
   canvas.width = Math.round(canvas.clientWidth * devicePixelRatio);
   canvas.height = Math.round(canvas.clientHeight * devicePixelRatio);
   const renderer = new Renderer(canvas);
+  // Traffic, if asked for. The complaint that started this was about an empty map,
+  // but a map with five thousand cars on it is the case that has to stay inside the
+  // budget too — and vehicles are the one pass the cache can never serve.
+  let sim: Simulation | null = null;
+  let simMs = 0;
+  if (WARM > 0) {
+    sim = new Simulation(net, {
+      seed: model.settings.seed,
+      demandScale: model.settings.demandScale,
+      demand: model.demand.length ? model.demand : undefined,
+      spawnMode: model.settings.spawnMode,
+      dayLength: model.settings.dayLength,
+      startHour: model.settings.startHour,
+    });
+    t = performance.now();
+    for (let s = 0; s < WARM; s += 0.05) sim.tick();
+    simMs = performance.now() - t;
+  }
+
   const input = {
-    network: net, paths, sim: null, alpha: 0, terrain: null, underlay: null, geo: null,
+    network: net, paths, sim, alpha: 0, terrain: null, underlay: null, geo: null,
     showGrid: false, showDiagnostics: false, overlays: [],
   };
 
   say(`${name}: ${net.segments.length} segments, ${net.lanes.length} lanes`);
   say(`compile ${compileMs.toFixed(0)} ms, bake ${bakeMs.toFixed(0)} ms`
     + `, canvas ${canvas.width}x${canvas.height} @${devicePixelRatio}`);
+  if (sim) {
+    say(`sim ${WARM}s warmed in ${simMs.toFixed(0)} ms: ${sim.store.count} vehicles on the map`);
+  }
   say(PAN ? 'panning while measuring' : 'still frames');
   say('');
 
@@ -96,14 +128,33 @@ async function main(): Promise<void> {
     const samples: number[] = [];
     let blits = 0;
     let captures = 0;
+    let worstMs = 0;
+    let worstPasses = '';
     for (let i = 0; i < FRAMES; i++) {
       if (PAN) {
-        renderer.camera.x = home.x + (i * canvas.clientWidth * SPEED / 60) / zoom;
+        // Back and forth rather than away: a drag that runs off the map measures an
+        // empty screen, which is fast for the wrong reason. A triangle wave keeps the
+        // network in view and still crosses the cache margin repeatedly.
+        const travelled = (i * canvas.clientWidth * SPEED / 60) / zoom;
+        const span = (canvas.clientWidth * 1.5) / zoom;
+        const phase = travelled % (2 * span);
+        renderer.camera.x = home.x + (phase < span ? phase : 2 * span - phase) - span / 2;
       }
-      if (ZOOMING) renderer.camera.zoom = zoom * Math.pow(1.02, i);
+      if (ZOOMING) renderer.camera.zoom = zoom * Math.pow(1.02, Math.floor(i / NOTCH));
+      if (sim) for (let k = 0; k < 4; k++) sim.tick();
       const start = performance.now();
       renderer.render(input);
-      samples.push(performance.now() - start);
+      const took = performance.now() - start;
+      samples.push(took);
+      // The worst frame is the one that shows as a hitch, so keep its breakdown
+      // rather than whatever the last frame happened to be doing.
+      if (took > worstMs) {
+        worstMs = took;
+        worstPasses = Object.entries(renderer.timings)
+          .filter(([, ms]) => ms > 0.4)
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, ms]) => `${k} ${ms.toFixed(0)}`).join('  ');
+      }
       blits += renderer.stats.blits;
       captures += renderer.stats.captures;
       await new Promise(requestAnimationFrame);
@@ -113,12 +164,8 @@ async function main(): Promise<void> {
       + `  worst ${worst.toFixed(1).padStart(6)} ms  tiles ${String(renderer.stats.tiles).padStart(4)}`
       + `  cache ${blits} reused / ${captures} redrawn`);
     say(rows[rows.length - 1]);
-    // Where the frame went, worst pass first: the whole point of measuring.
-    const passes = Object.entries(renderer.timings)
-      .filter(([, ms]) => ms > 0.2)
-      .sort((a, b) => b[1] - a[1])
-      .map(([k, ms]) => `${k} ${ms.toFixed(0)}`);
-    say(`      ${passes.join('  ')}`);
+    // Where the worst frame went, worst pass first: the whole point of measuring.
+    say(`      worst frame: ${worstPasses}`);
   }
   (window as unknown as { __bench: string[] }).__bench = rows;
   say('');

@@ -1205,8 +1205,21 @@ markings → signals) → vehicles (per grade) → editor overlays.
     gesture is what every map does. Refused past 2.5x, where it stops being soft and becomes a smear,
     and refused when the cached area no longer reaches the edges — which is what zooming out does.
     Only the part that lands on screen is sampled: handing the whole bitmap over and letting the
-    canvas clip it resamples 1.96 viewports to show one, and measured 18 ms a frame. Zoom gesture on
-    the same import: **251 ms a frame to 16**.
+    canvas clip it resamples 1.96 viewports to show one, and measured 18 ms a frame.
+  - **A wheel does not turn every frame, and "the zoom did not move" is not "the gesture is over".**
+    Notches arrive every 30-60 ms against a 16 ms frame, so most frames of a gesture see an unchanged
+    zoom — and reading that as a settle takes the full sharp redraw *between every notch*. Measured on
+    the two-mile import with a realistic cadence: **19 full redraws in 60 frames at 234 ms each**, the
+    cache doing its job on the notches and being thrown away in between, which is worse than no cache
+    because the stretch is paid for as well. The gesture is therefore a *window*
+    (`ZOOM_SETTLE_MS`, 180 ms after the last change) rather than a comparison with the previous
+    frame: long enough to bridge the gap between notches, short enough that the picture sharpens as
+    soon as the hand stops. Same gesture afterwards: **0-1 redraws, worst frame 244 ms to 45**.
+    `test/render/zoom.test.ts` asserts both halves, because either alone is a bug — the gesture must
+    not redraw, and it must sharpen once the wheel stops.
+  - **Copying and redrawing are timed under different names.** They differ by two orders of magnitude,
+    and one bracket around both reported a 134 ms redraw as a slow `blit` — which sends you optimising
+    the one that was already free. It is the same mistake as `blit` once being billed to `signals`.
   - Signals, vehicles, overlays, diagnostics and the grid are drawn live on top, every frame.
 - Tunnels (grade < 0): dashed casing, fill and vehicles at ~40% alpha. Bridges (grade > 0): a
   **parapet** — lighter than the casing and wider — plus a two-layer drop shadow.
@@ -1738,9 +1751,10 @@ Roundabouts are the obvious next feature. None of it before merges are flawless.
 
 ## Testing strategy
 
-`npm test` runs 771 tests in about 140 s; the merge suite is most of that and is worth every
-second. Two of them are red, both in `test/sim/committed-crossing.test.ts`, and they are the
-at-grade priority crossing under **Milestones** — not a flake and not something to re-run away.
+`npm test` runs 773 tests in about 140 s, all green; the merge suite is most of that and is worth
+every second. The two that were long red — the at-grade priority crossing in
+`test/sim/committed-crossing.test.ts` — went green with `PRIORITY_MAX_SPEED`, which is to say the
+compiler stopped building the junction rather than the simulation learning to survive it.
 
 - **Geometry units** (`test/geom/`): crossing cases, flattening within tolerance, offset cusp and
   loop repair, arc-length correctness, polygon booleans, taper geometry.
@@ -1794,6 +1808,9 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   lane graph while drawing. Hand-wiring is driven the way a user does it — two shift-clicks add a
   movement, the same pair again removes it, and a movement back down the road it came from is
   refused rather than silently discarded at compile time.
+- **The cache earns its keep** (`test/render/zoom.test.ts`): a wheel gesture at a realistic cadence
+  must not redraw the map between notches, and must sharpen once the wheel stops. Both halves, because
+  either alone is a bug — and the failure it guards was invisible at one notch per frame.
 - **Render** (`test/render/`): the whole pipeline under a stub canvas — layers run, culling and LOD
   actually change what is drawn, and the renderer never mutates sim state. Plus the gore
   regressions: the corridor between a ramp and its auxiliary lane is paved, a junction footprint is
@@ -1873,7 +1890,16 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   none of the drawing — it reported 1.0 ms for a frame that a browser took 46 ms over, and 0.02 ms
   for one that took 302. It is still worth having for the tick and the compile; it cannot be trusted
   for a frame. `renderer.timings` breaks a frame down by pass the way `sim.timings` does, and is what
-  turned "the map is laggy" into "casing 128 ms of 268".
+  turned "the map is laggy" into "casing 128 ms of 268". It reports the breakdown of the **worst**
+  frame rather than the last one, because the worst frame is the one that shows as a hitch.
+
+  Three of its options exist because measuring the wrong gesture says the wrong thing.
+  `pan=1` oscillates rather than running away — a drag that leaves the map measures an empty screen,
+  which is fast for the wrong reason (`tiles 0` is the tell). `notch=N` moves the zoom every N frames
+  instead of every frame, which is what a wheel actually does and is the only way the per-notch
+  redraw above is visible at all: at `notch=1` the cache looked healthy. `sim=N` warms N simulated
+  seconds first, so the frames carry real traffic — vehicles are the one pass a cache can never
+  serve.
 - **Perf smoke** (`npm run bench`): 5,000 vehicles on a synthetic 287 km-of-lane freeway network.
   Currently compile 68 ms, tick 2.3 ms median under Vitest (budget 6, see the harness note below),
   street-level frame 0.6 ms. That network is a fixed size, which is the one thing it cannot measure —
@@ -2196,6 +2222,17 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
   only falls back to the viewport for one that was laid out — the road previews state theirs.
 - **`setPointerCapture` throws** for a pointer the browser is not tracking, and an exception in
   `pointerdown` takes the pan branch down with it. It is wrapped in a `try`.
+- **A gesture is a window, not a difference between two frames.** `zooming` was
+  `camera.zoom !== lastZoom`, which is true only on the frames a notch lands on. A wheel turns every
+  30-60 ms against a 16 ms frame, so most frames of a gesture look identical to a settled one — and
+  the cache took its full sharp redraw *between every notch*: 19 redraws in 60 frames at 234 ms each
+  on a two-mile import, which is the whole of "the map is laggy to zoom". The cache was working
+  perfectly on the frames anybody thought to test. Anything keyed on "did the user just do X" wants
+  a time window; and measure it at the cadence the input actually arrives at, because at one notch
+  per frame this looked healthy.
+- **A cache that is thrown away is worse than no cache**, because the copy is paid for as well as the
+  redraw. Whenever one is added, count the hits *and* the misses over a realistic gesture — a hit
+  rate is the only thing that distinguishes a cache that works from one that is pure overhead.
 - **The renderer must never mutate sim or network state.** If you need derived data, compute it in a
   compile step or a sim-side cache. There is a test.
 - **Core has no environment, and Node is not the browser.** The non-negotiable says core never
@@ -2238,6 +2275,6 @@ at-grade priority crossing under **Milestones** — not a flake and not somethin
 - **A left-turner part-way across is not somebody else's problem.** A committed vehicle stops giving
   way as a matter of priority, which is right, but ignoring an *uncommitted* rival entirely is not:
   a driver still short of the conflict point has a choice, and one closing at 26 m/s with fifty
-  metres to go has none. See the junction section. Still imperfect — an at-grade *priority* crossing
-  with a big speed mismatch (110 km/h dual carriageway, 45 km/h street) still produces the odd
-  collision, three on one seed in six over fifteen minutes, and that is the next thing to fix.
+  metres to go has none. See the junction section. The at-grade *priority* crossing with a big speed
+  mismatch (110 km/h dual carriageway, 45 km/h street) that used to collide here is closed, and in
+  the compiler rather than here: `PRIORITY_MAX_SPEED` means it is never built on priority at all.

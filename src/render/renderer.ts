@@ -51,6 +51,21 @@ export interface RenderStats {
 const _pose = { x: 0, y: 0, heading: 0 };
 const _pt = { x: 0, y: 0 };
 
+/**
+ * How long after the last zoom change the gesture is still treated as running.
+ *
+ * A wheel does not turn every frame. Notches arrive every 30-60 ms against a 16 ms
+ * frame, so most frames of a gesture see an unchanged zoom — and reading that as
+ * "the gesture is over" takes the sharp redraw *between every notch*. Measured on a
+ * two-mile import that was 19 full redraws in 60 frames at 234 ms each, which is the
+ * whole of "the map is laggy to zoom": the cache was doing its job on the notches and
+ * being thrown away on the frames in between.
+ *
+ * Long enough to bridge the gap between notches, short enough that the picture
+ * sharpens as soon as the hand stops.
+ */
+const ZOOM_SETTLE_MS = 180;
+
 export class Renderer {
   readonly camera = new Camera();
   theme: Theme = DARK;
@@ -80,7 +95,10 @@ export class Renderer {
 
   private lastZoom = 0;
 
-  /** Whether the zoom moved since the last frame: a gesture rather than a state. */
+  /** When the zoom last moved, so a gesture can be told from the frame after one. */
+  private zoomMovedAt = -Infinity;
+
+  /** Whether a zoom gesture is still running: see `ZOOM_SETTLE_MS`. */
   private zooming = false;
 
   private lap(key: string): void {
@@ -161,8 +179,11 @@ export class Renderer {
     // One grade is cached, and it is the one carrying the picture: a stack has to
     // interleave with its traffic, so caching all of them would either draw cars
     // through flyovers or cost an offscreen canvas per level.
-    this.zooming = camera.zoom !== this.lastZoom;
-    this.lastZoom = camera.zoom;
+    if (camera.zoom !== this.lastZoom) {
+      this.zoomMovedAt = performance.now();
+      this.lastZoom = camera.zoom;
+    }
+    this.zooming = performance.now() - this.zoomMovedAt < ZOOM_SETTLE_MS;
 
     this.cachedGrade = Number.NaN;
     // Nothing to cache while the picture is still being made: decoration changes it
@@ -207,6 +228,7 @@ export class Renderer {
     // last frame, in the same place, in the same colours: only the camera moved.
     // Blit the copy if there is one, and take one if this is the grade worth it.
     const cache = grade === this.cachedGrade ? this.staticLayer : null;
+    const captured = this.stats.captures;
     let painted = false;
     if (cache && cache.blit(ctx, camera, grade)) {
       painted = true;
@@ -226,7 +248,10 @@ export class Renderer {
     camera.applyTo(ctx);
     // Attributed on its own: on a blit frame nothing else in the stack runs, and
     // without this the copy's cost lands on whichever pass happens to be timed next.
-    this.lap('blit');
+    // Copying and redrawing are timed under *different* names, because they differ by
+    // two orders of magnitude and one bracket around both reports a 134 ms redraw as
+    // a slow `blit` — which sends you optimising the one that was already free.
+    this.lap(this.stats.captures > captured ? 'capture' : 'blit');
 
     if (camera.zoom >= LOD.signals) this.drawSignals(input.network, grade, view);
     this.lap('signals');
