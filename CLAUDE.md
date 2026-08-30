@@ -1192,6 +1192,11 @@ markings → signals) → vehicles (per grade) → editor overlays.
   place** — a canvas may be drawn onto itself — and only the strip that has come into view is drawn,
   clipped to it and with the tiles culled to it, so a pan pays for the edge it uncovers rather than
   for the map. Median frame on that import: **0 ms at every zoom**, worst 4.
+  - **The scroll uses `copy`, not `source-over`.** This offscreen is transparent wherever there is
+    no road — the background belongs to the visible canvas — so compositing the shifted picture over
+    itself leaves the unshifted one showing through everywhere the shifted one is clear. That is a
+    second copy of the map, offset by the pan, and every margin crossing lays down another: panning
+    a stacked interchange arrived four deep. See the tarpit.
   - **Only one grade is cached**, the one with the most tiles on screen. A stack has to interleave —
     a vehicle on the ground belongs *under* the bridge above it — so one bitmap of everything would
     draw cars through flyovers, and one per level is a hundred megabytes at four levels on a machine
@@ -1810,7 +1815,9 @@ compiler stopped building the junction rather than the simulation learning to su
   refused rather than silently discarded at compile time.
 - **The cache earns its keep** (`test/render/zoom.test.ts`): a wheel gesture at a realistic cadence
   must not redraw the map between notches, and must sharpen once the wheel stops. Both halves, because
-  either alone is a bug — and the failure it guards was invisible at one notch per frame.
+  either alone is a bug — and the failure it guards was invisible at one notch per frame. Plus
+  `test/render/staticLayer.test.ts`: the scroll replaces the old picture rather than compositing over
+  it, which is the difference between a pan and four copies of the map.
 - **Render** (`test/render/`): the whole pipeline under a stub canvas — layers run, culling and LOD
   actually change what is drawn, and the renderer never mutates sim state. Plus the gore
   regressions: the corridor between a ramp and its auxiliary lane is paved, a junction footprint is
@@ -2222,6 +2229,19 @@ compiler stopped building the junction rather than the simulation learning to su
   only falls back to the viewport for one that was laid out — the road previews state theirs.
 - **`setPointerCapture` throws** for a pointer the browser is not tracking, and an exception in
   `pointerdown` takes the pan branch down with it. It is wrapped in a `try`.
+- **An offscreen cache is transparent where nothing is drawn.** The static layer scrolls its bitmap
+  by drawing it onto itself at an offset, which is the standard trick and is well defined — but with
+  the default `source-over` it *composites* rather than replaces, and this bitmap holds only roads:
+  everything between them is clear, not background. So the shifted picture let the unshifted one
+  show through, a whole second copy offset by the pan, and a third and a fourth as the drag crossed
+  the margin again. `copy` replaces the destination outright, transparency included.
+
+  Two things about how it hid. It is invisible on a picture that covers its own canvas and glaring on
+  a sparse one — a stacked interchange on black is the worst case and a dense town the mildest — and
+  it only exists *between* full redraws, so any check that forced one first read clean. Three
+  pixel-diff comparisons against a freshly captured reference all returned zero differing pixels
+  before the bug was found by dumping the cached bitmap itself. When a cache is suspected, look at
+  what it holds, not at what it produces.
 - **A gesture is a window, not a difference between two frames.** `zooming` was
   `camera.zoom !== lastZoom`, which is true only on the frames a notch lands on. A wheel turns every
   30-60 ms against a 16 ms frame, so most frames of a gesture look identical to a settled one — and

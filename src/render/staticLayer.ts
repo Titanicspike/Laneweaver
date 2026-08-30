@@ -166,8 +166,21 @@ export class StaticLayer {
     // Scroll what is still good into its new place, then clear and redraw only what
     // has come into view. Drawing a canvas onto itself is defined to read the source
     // as it was, so this needs no second buffer.
+    //
+    // `copy`, not the default `source-over`, and that is the whole of it. This
+    // offscreen is *transparent* wherever there is no road — the background is
+    // painted on the visible canvas, not here — so compositing the shifted picture
+    // over itself leaves the unshifted one showing through everywhere the shifted
+    // one happens to be clear. That is a second copy of the map, offset by the pan,
+    // and every margin crossing lays down another: pan a stacked interchange and it
+    // arrives four deep, which is what "everything is layered on top of each other"
+    // was. `copy` replaces the destination outright, transparency included.
     const rects = reusable ? exposed(shiftX, shiftY, px, py) : [{ x: 0, y: 0, w: px, h: py }];
-    if (reusable) target.drawImage(this.front, shiftX, shiftY);
+    if (reusable) {
+      target.globalCompositeOperation = 'copy';
+      target.drawImage(this.front, shiftX, shiftY);
+      target.globalCompositeOperation = 'source-over';
+    }
     for (const rect of rects) target.clearRect(rect.x, rect.y, rect.w, rect.h);
 
     target.lineJoin = 'round';

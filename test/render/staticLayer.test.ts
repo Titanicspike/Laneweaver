@@ -159,6 +159,36 @@ describe('the static layer', () => {
     expect(rec.calls[1].only, 'an edit is redrawn, not scrolled').toBeNull();
   });
 
+  it('replaces the old picture when it scrolls rather than compositing over it', () => {
+    // This offscreen is *transparent* wherever there is no road — the background is
+    // painted on the visible canvas, not here. So scrolling it with the default
+    // `source-over` leaves the unshifted picture showing through everywhere the
+    // shifted one happens to be clear: a second copy of the whole map, offset by the
+    // pan, with another laid down at every margin crossing. Panning a stacked
+    // interchange arrived four deep.
+    const layer = new StaticLayer();
+    const ctx = context();
+    const rec = recorder();
+    layer.capture(ctx as never, camera(), 0, rec.draw);
+
+    const offscreen = StubContext.instances[StubContext.instances.length - 1];
+    const before = offscreen.calls.length;
+    layer.capture(ctx as never, camera(120, 60), 0, rec.draw);
+    const scrolled = offscreen.calls.slice(before).filter((c) => c.op === 'drawImage');
+
+    expect(scrolled.length, 'the old picture is scrolled into place').toBeGreaterThan(0);
+    expect(scrolled[0].globalCompositeOperation,
+      'scrolled with `copy`, or the old picture shows through the new one').toBe('copy');
+
+    // And put back, or every road drawn afterwards erases what is under it.
+    const after = offscreen.calls.slice(before);
+    const drew = after.findIndex((c) => c.op === 'fill' || c.op === 'stroke');
+    if (drew >= 0) {
+      expect(after[drew].globalCompositeOperation,
+        'ordinary drawing composites normally').toBe('source-over');
+    }
+  });
+
   it('gives up rather than throwing where a canvas cannot blit', () => {
     // The jsdom canvas in the application tests has no `drawImage`, and a renderer
     // that assumed one would fail half way through a frame.

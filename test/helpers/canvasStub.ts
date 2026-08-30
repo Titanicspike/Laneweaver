@@ -14,6 +14,7 @@ export interface DrawCall {
   fillStyle?: string;
   lineWidth?: number;
   globalAlpha?: number;
+  globalCompositeOperation?: string;
 }
 
 export class StubPath2D {
@@ -46,6 +47,7 @@ export class StubContext {
   lineJoin = '';
   lineCap = '';
   globalAlpha = 1;
+  globalCompositeOperation = 'source-over';
   font = '';
   textAlign = '';
   textBaseline = '';
@@ -65,6 +67,7 @@ export class StubContext {
       fillStyle: this.fillStyle,
       lineWidth: this.lineWidth,
       globalAlpha: this.globalAlpha,
+      globalCompositeOperation: this.globalCompositeOperation,
     });
   }
 
