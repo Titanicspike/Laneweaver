@@ -38,6 +38,11 @@ export interface Theme {
   embankment: string;
   /** The hachures across it: lighter than the ground, so the slope reads close up. */
   embankmentHachure: string;
+  /**
+   * The legs a raised deck stands on. Darker than the parapet and lighter than the
+   * shadow they stand in, so they read as structure rather than as more shadow.
+   */
+  bridgePier: string;
   tunnelAlpha: number;
 
   treeCrown: string;
@@ -120,6 +125,7 @@ export const DARK: Theme = {
   bridgeParapet: '#5a6069',
   embankment: '#282d35',
   embankmentHachure: '#4a515c',
+  bridgePier: '#3b414a',
   tunnelAlpha: 0.4,
 
   treeCrown: '#2c4232',
@@ -202,6 +208,8 @@ export const WIDTHS = {
   casing: 0.55,
   /** One hachure. Thinner than the casing, or the ticks read as little roads. */
   embankment: 0.34,
+  /** One pier leg, seen end-on from above. */
+  pier: 0.75,
   /** The parapet along a raised deck: wider than the casing, so it reads as built. */
   parapet: 0.95,
   laneMarking: 0.14,

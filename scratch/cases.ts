@@ -267,6 +267,27 @@ export function cases(): Case[] {
     const three = add(m, a, line(-700, 500, 700, -500, 5));
     [0, 3, 3, 3, 0].forEach((g, i) => { three.points[i]!.grade = g; });
   }, [0, 0], 2.2);
+  // A road that climbs from one raised level to the next without ever coming down.
+  // This is the case that showed embankments where there is no ground: made ground
+  // only exists between a road and the earth, and a viaduct stepping from level 1 to
+  // level 2 never touches it. Above the abutment the cue is the legs it stands on.
+  make('grade-viaduct-step', (m) => {
+    const a = arterial(m, 2.4);
+    add(m, freeway(m, 3), line(-900, -260, 900, -260, 3));
+    add(m, freeway(m, 3), line(-900, 260, 900, 260, 3), 1);
+    const s = add(m, a, line(-900, 0, 900, 0, 7));
+    [0, 1, 1, 2, 1, 1, 0].forEach((g, i) => { s.points[i]!.grade = g; });
+  }, [0, 0], 1.4);
+  // The same going down. A tunnel below the first level has neither a cutting nor
+  // piers — nothing carries a road that is under the ground — so its depth is
+  // carried by how much of it can be seen.
+  make('grade-tunnel-deep', (m) => {
+    const a = arterial(m, 2.4);
+    add(m, freeway(m, 3), line(-900, -260, 900, -260, 3));
+    add(m, freeway(m, 3), line(-900, 260, 900, 260, 3), -1);
+    const s = add(m, a, line(-900, 0, 900, 0, 7));
+    [0, -1, -1, -2, -1, -1, 0].forEach((g, i) => { s.points[i]!.grade = g; });
+  }, [0, 0], 1.4);
   // Junctions that are awkward on purpose: this is where an arm grown a little too
   // long shows up as asphalt hanging off the far side of the box.
   make('tee-skew-35', (m) => {

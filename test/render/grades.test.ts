@@ -109,7 +109,8 @@ function drawsACapAt(runs: Subpath[], segment: Segment, atEnd: boolean): boolean
 
 /** Every subpath of one layer, across however many tiles the road is bucketed into. */
 function layer(
-  paths: NetworkPaths, grade: number, which: 'casing' | 'shadow' | 'earthwork' | 'slope',
+  paths: NetworkPaths, grade: number,
+  which: 'casing' | 'shadow' | 'earthwork' | 'slope' | 'piers',
 ): Subpath[] {
   const tiles = paths.query(grade, WORLD);
   expect(tiles.length).toBeGreaterThan(0);
@@ -129,6 +130,32 @@ function halfWidth(net: Network): number {
     for (let i = 0; i < seg.surface.length; i += 2) w = Math.max(w, Math.abs(seg.surface[i]!));
   }
   return w;
+}
+
+
+/**
+ * A road that steps from one raised level to the next without ever coming down.
+ *
+ * This is the shape that showed the bug: made ground only exists between a road and
+ * the earth, and a viaduct climbing from level 1 to level 2 never touches it.
+ */
+function viaduct(): Network {
+  const model: EditModel = doc();
+  const profile = addProfile(model, {
+    name: 'arterial', lanesForward: 2, lanesBackward: 2, laneWidth: 3.5,
+    median: 2.4, shoulder: 0.5, speedLimit: kph(70),
+  });
+  const stroke = addStroke(model, profile, line(-900, 0, 900, 0, 7));
+  [1, 1, 1, 2, 1, 1, 1].forEach((g, i) => { stroke.points[i]!.grade = g; });
+  return compile(model);
+}
+
+/** How long each pier leg is, longest first. */
+function pierLengths(paths: NetworkPaths, grade: number): number[] {
+  return layer(paths, grade, 'piers')
+    .filter((sub) => sub.points.length >= 4)
+    .map((sub) => Math.hypot(sub.points[2]! - sub.points[0]!, sub.points[3]! - sub.points[1]!))
+    .sort((a, b) => b - a);
 }
 
 /**
@@ -374,5 +401,48 @@ describe('earthworks', () => {
       }
       expect(checked, `${name}: wedges actually tested`).toBeGreaterThan(4);
     }
+  });
+});
+
+describe('a road that changes level without touching the ground', () => {
+  // An embankment between level 1 and level 2 is a picture of something that is not
+  // there. Made ground exists between a road and the earth; a viaduct stepping from
+  // one raised level to the next is carried on its own structure the whole way.
+  it('has no made ground anywhere along it', () => {
+    const net = viaduct();
+    const paths = new NetworkPaths(net);
+    const grades = [...new Set(net.segments.map((seg) => seg.grade))];
+    expect(grades, 'the fixture really does step between levels').toContain(2);
+    for (const grade of grades) {
+      expect(layer(paths, grade, 'earthwork').length,
+        `grade ${grade}: no embankment where there is no ground`).toBe(0);
+      expect(layer(paths, grade, 'slope').length,
+        `grade ${grade}: and no hachures either`).toBe(0);
+    }
+  });
+
+  it('stands on piers instead, and they lengthen as it climbs', () => {
+    // The legs are the cue that replaces the embankment: they fall the way the
+    // shadows do and their length comes from the road's own height, so a deck going
+    // up shows it continuously with nothing switching on anywhere.
+    const paths = new NetworkPaths(viaduct());
+    const low = pierLengths(paths, 1);
+    const high = pierLengths(paths, 2);
+    expect(low.length, 'the level-1 deck stands on something').toBeGreaterThan(2);
+    expect(high.length, 'and so does the level-2 deck').toBeGreaterThan(0);
+    expect(high[0]!, 'the higher deck stands on longer legs').toBeGreaterThan(low[0]!);
+  });
+
+  it('gives a tunnel no piers, because nothing carries a road under the ground', () => {
+    const paths = new NetworkPaths(overpass(-1));
+    for (const grade of [0, -1]) {
+      expect(layer(paths, grade, 'piers').length, `grade ${grade}`).toBe(0);
+    }
+  });
+
+  it('still puts made ground where the road really does meet it', () => {
+    // The bound must not throw away the case it was built for: a ramp from the
+    // ground to the first level is on fill, and that is most bridges on most maps.
+    expect(layer(new NetworkPaths(overpass(1)), 0, 'earthwork').length).toBeGreaterThan(0);
   });
 });

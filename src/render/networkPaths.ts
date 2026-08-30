@@ -72,6 +72,8 @@ export interface Tile {
    */
   earthwork: Path2D;
   slope: Path2D;
+  /** The legs a raised deck stands on. See `addPiers`. */
+  piers: Path2D;
   /** Verge planting: crowns, then the lighter side of each one. */
   trees: Path2D;
   treeTops: Path2D;
@@ -124,6 +126,7 @@ function makeTile(grade: number, gx: number, gy: number): Tile {
     shadowFar: new Path2D(),
     earthwork: new Path2D(),
     slope: new Path2D(),
+    piers: new Path2D(),
     trees: new Path2D(),
     treeTops: new Path2D(),
     plotGround: new Path2D(),
@@ -509,6 +512,7 @@ export class NetworkPaths {
     addShadow(tile.shadowFar, segment.surface, segment.surfaceHeight, SHADOW_SPREAD);
     addEarthwork(tile.earthwork, tile.slope, segment.surface, segment.surfaceHeight,
       segment.surfaceSplit);
+    addPiers(tile.piers, segment.surface, segment.surfaceHeight, segment.surfaceSplit);
 
     for (const marking of segment.markings) addMarking(tile, marking);
     for (const symbol of segment.symbols) {
@@ -952,14 +956,52 @@ function addEarthwork(
   }
 }
 
-/** Whether the edge leaving vertex `i` gains enough height to be a slope. */
+/**
+ * Whether the edge leaving vertex `i` is sloping *and* low enough to be on ground.
+ *
+ * Made ground only exists between the road and the ground: fill heaped up to carry
+ * it, or a cut down to let it through. A road ramping from level 1 to level 2 never
+ * touches the ground at all — it is a viaduct climbing on its own structure — so an
+ * embankment there is a picture of something that is not there. Above `ABUTMENT` the
+ * cue is piers instead.
+ */
 function sloping(ring: Float32Array, height: Float32Array, i: number): boolean {
   const dx = ring[(i + 1) * 2] - ring[i * 2];
   const dy = ring[(i + 1) * 2 + 1] - ring[i * 2 + 1];
   const len = Math.sqrt(dx * dx + dy * dy);
   if (len < 1e-4) return false;
+  // Strictly below: at the abutment itself the structure has taken over, and the
+  // piers start at exactly that height. Allowing equality put a full-width band at
+  // the foot of every ramp between two raised levels — the same wrong picture in
+  // miniature, and the thing this bound exists to prevent.
+  if (Math.abs(height[i] ?? 0) >= ABUTMENT) return false;
   return Math.abs((height[i + 1] ?? 0) - (height[i] ?? 0)) / len >= SLOPE_MIN_GRADIENT;
 }
+
+/**
+ * The height at which fill gives way to structure, in levels.
+ *
+ * One level is a road's worth of clearance, which is about as high as anybody builds
+ * an embankment before it becomes cheaper to put the road on legs. It is also the
+ * only place the two cues can hand over without a gap: below it the road is on made
+ * ground, above it on piers, and the join is the abutment.
+ */
+const ABUTMENT = 1;
+
+/** How far apart the piers of a viaduct stand, in metres. */
+const PIER_SPACING = 26;
+
+/**
+ * How far a pier's foot is from its deck edge, per level of height.
+ *
+ * This is the whole cue: seen from above with the light where the shadows already
+ * put it, a column under a deck reads as a leg reaching from the deck edge down to
+ * the ground, and a taller column reaches further. So a deck that is climbing grows
+ * its legs as it goes, continuously, with nothing switching on anywhere — which is
+ * what an embankment does for a road near the ground and what nothing did for a road
+ * already in the air.
+ */
+const PIER_PER_LEVEL = 3.6;
 
 /** One run of made ground: out along the toe of the slope, back along the kerb. */
 function addEarthworkRun(
@@ -1041,6 +1083,48 @@ function addEarthworkRun(
     ticks.lineTo(topX - tx * w, topY - ty * w);
     ticks.lineTo(topX + nrm[0] * r * dir, topY + nrm[1] * r * dir);
     ticks.closePath();
+  }
+}
+
+/**
+ * The legs a raised deck stands on, wherever it is above the reach of made ground.
+ *
+ * Drawn along both deck edges at a fixed spacing, in the same direction the shadows
+ * fall, with a length taken from the road's own height at that point. Three things
+ * come out of that for free: a flat viaduct reads as carried on something rather
+ * than merely lying on top of what it covers; a deck that climbs *shows* it, because
+ * its legs lengthen as it rises; and the handover from embankment to pier happens at
+ * the abutment, where a real one happens, with neither cue drawn on top of the other.
+ */
+function addPiers(path: Path2D, ring: Float32Array, height: Float32Array, split: number): void {
+  const n = ring.length >> 1;
+  if (n < 4 || split < 2 || split > n - 2 || height.length < n) return;
+  // Only above the ground. A tunnel has no piers — nothing carries a road that is
+  // under the ground — and below the abutment the earthwork has it.
+  let raised = false;
+  for (let i = 0; i < n; i++) if ((height[i] ?? 0) >= ABUTMENT) { raised = true; break; }
+  if (!raised) return;
+
+  const len = Math.sqrt(SHADOW_OFFSET.x * SHADOW_OFFSET.x + SHADOW_OFFSET.y * SHADOW_OFFSET.y);
+  const ux = SHADOW_OFFSET.x / len;
+  const uy = SHADOW_OFFSET.y / len;
+
+  for (const [from, to] of [[0, split], [split, n]] as [number, number][]) {
+    let since = PIER_SPACING;
+    for (let i = from; i < to; i++) {
+      if (i > from) {
+        const dx = ring[i * 2] - ring[(i - 1) * 2];
+        const dy = ring[i * 2 + 1] - ring[(i - 1) * 2 + 1];
+        since += Math.sqrt(dx * dx + dy * dy);
+      }
+      const h = height[i] ?? 0;
+      if (h < ABUTMENT) continue;
+      if (since < PIER_SPACING) continue;
+      since = 0;
+      const reach = shadowHeight(h) * PIER_PER_LEVEL;
+      path.moveTo(ring[i * 2], ring[i * 2 + 1]);
+      path.lineTo(ring[i * 2] + ux * reach, ring[i * 2 + 1] + uy * reach);
+    }
   }
 }
 

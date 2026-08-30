@@ -1240,6 +1240,25 @@ markings → signals) → vehicles (per grade) → editor overlays.
   would be sub-pixel. It exists only where the road is actually sloping: a deck spanning on piers
   has no earthwork under it, and the band stopping is the **abutment**, which nothing else in the
   picture said.
+  - **Made ground only exists between a road and the earth**, so it stops at `ABUTMENT` (one level).
+    A road stepping from level 1 to level 2 never touches the ground — it is a viaduct climbing on
+    its own structure — and an embankment there is a picture of something that is not there. The
+    bound is strict: allowing equality put a full-width band at the foot of every ramp between two
+    raised levels, which is the same wrong picture in miniature.
+  - **Above the abutment the cue is the legs the deck stands on** (`addPiers`). They are drawn along
+    both deck edges at a fixed spacing, in the same direction the shadows fall, with a length taken
+    from the road's own height — so, seen from above, a column under a deck reads as a leg reaching
+    down to the ground, and a taller column reaches further. A deck that is climbing shows it by its
+    legs lengthening, continuously, with nothing switching on anywhere. A flat viaduct gets them too,
+    which is worth having on its own: it reads as *carried* on something rather than merely lying on
+    top of what it covers.
+  - **A tunnel below the first level has neither.** Nothing carries a road that is under the ground
+    and there is no made ground down there either, so depth is carried by the one thing that really
+    does change: how much of it can be seen. `depthAlpha` fades a tunnel further with each level,
+    linearly with a floor — compounding the 0.4 makes a third-level tunnel invisible. Vehicles take
+    the same alpha, set per stack rather than left over from `drawStatic`, which does not run on the
+    visible canvas at all when the layer is blitted — so a tunnel's traffic used to be drawn at full
+    strength on exactly the frames the cache was working.
   - **The band is outside the carriageway either way.** An embankment is fill heaped against the
     road and a cutting is ground left standing beside it. Putting a cutting's band on the inside —
     which is where "point down the slope" naively leads — buries the whole thing under the asphalt
@@ -1793,7 +1812,7 @@ Roundabouts are the obvious next feature. None of it before merges are flawless.
 
 ## Testing strategy
 
-`npm test` runs 779 tests in about 140 s, all green; the merge suite is most of that and is worth
+`npm test` runs 783 tests in about 140 s, all green; the merge suite is most of that and is worth
 every second. The two that were long red — the at-grade priority crossing in
 `test/sim/committed-crossing.test.ts` — went green with `PRIORITY_MAX_SPEED`, which is to say the
 compiler stopped building the junction rather than the simulation learning to survive it.
@@ -1871,11 +1890,14 @@ compiler stopped building the junction rather than the simulation learning to su
   the two sides of an abutment agree on how high they are, the shadow is displaced by that height
   rather than by the layer, the casing draws no cap where the road carries on — and still draws one
   where it stops — and the renderer strokes the outline rather than the surface. Bridge and tunnel
-  both. Earthworks are checked for the three things that are silent when they go wrong: a sloping
-  road has made ground beside it and a flat one has none, no part of it ever lies over the
-  carriageway (the cutting bug, which drew a band the asphalt then covered), and the hachures point
-  down the slope — outward off an embankment, inward into a cutting, which is the only thing telling
-  the two apart.
+  both. Earthworks are checked for the things that are silent when they go wrong: a sloping road has
+  made ground beside it and a flat one has none, no part of it ever lies over the carriageway (the
+  cutting bug, which drew a band the asphalt then covered), and the hachures point down the slope —
+  outward off an embankment, inward into a cutting, which is the only thing telling the two apart.
+  A road that steps from one raised level to the next gets its own file section, because that is
+  where made ground is a picture of nothing: it must have no embankment and no hachures at any
+  grade, it must stand on piers instead, and those piers must be *longer* on the higher deck — a
+  fixed length would satisfy every other assertion here and say nothing about the climb.
 - **Scenario regressions** (`test/scenarios/`): the merge suite above, a four-way priority junction,
   an all-way stop, a signalised arterial grid, and a five-way — where some destinations are simply
   not reachable from some approaches, and no vehicle may drive through another however busy it gets.
@@ -1973,7 +1995,7 @@ compiler stopped building the junction rather than the simulation learning to su
   is what found the zoning split brain.
 - **Visual verification** (`scratch/`, dev-only, not in `npm test`). Most defects this project has
   shipped were visual, and a screenshot at a time is not a way to find them. Three tools:
-  `scratch/cases.ts` is a zoo of ~39 documents — the five example maps included, because those are
+  `scratch/cases.ts` is a zoo of ~41 documents — the five example maps included, because those are
   the documents a user actually opens, so a fault in one of them is a fault the user sees first — — every ramp shape at one and two lanes into two,
   three and four-lane freeways, weaves, lane drops, a road that bridges over another and one that
   tunnels under it, crossings straight, skew, curved, wide-into-narrow and five-way, plus the demo
@@ -2283,6 +2305,12 @@ compiler stopped building the junction rather than the simulation learning to su
   pixel-diff comparisons against a freshly captured reference all returned zero differing pixels
   before the bug was found by dumping the cached bitmap itself. When a cache is suspected, look at
   what it holds, not at what it produces.
+- **A cue borrowed from the ground does not survive being lifted off it.** Embankments read well for
+  a road climbing from the ground to a bridge and are nonsense between level 1 and level 2, where
+  there is no ground to make: the same drawing is honest in one place and invented in the other. The
+  test is not "does it look right on the case I built" but "what is this a picture *of*, and is that
+  thing there". Above the abutment the honest answer is structure, so the cue is the legs the deck
+  stands on; under the ground there is no honest answer at all, so it is how much can be seen.
 - **A threshold calibrated on one source silently excludes the other.** The earthwork's "is this
   road sloping" floor was set from the OSM importer's fixed 45 m level ramp, which is an order of
   magnitude steeper than a hand-drawn one — so the feature drew nothing at all on the zoo case built

@@ -66,6 +66,21 @@ const _pt = { x: 0, y: 0 };
  */
 const ZOOM_SETTLE_MS = 180;
 
+/**
+ * How strongly a road below the ground is drawn, by how far below it is.
+ *
+ * A bridge that climbs from one level to the next shows it by the legs it stands on
+ * getting longer. A tunnel that descends has no such thing — nothing carries a road
+ * that is under the ground, and there is no made ground below the first level either
+ * — so depth is carried by how much of it you can see, which is the one thing that
+ * really does change as it goes further down. Linear with a floor rather than
+ * compounding: at 0.4 to the power of the level a third-level tunnel is invisible.
+ */
+function depthAlpha(base: number, grade: number): number {
+  if (grade >= 0) return 1;
+  return Math.max(0.12, base * (1 - 0.25 * (Math.abs(grade) - 1)));
+}
+
 export class Renderer {
   readonly camera = new Camera();
   theme: Theme = DARK;
@@ -256,6 +271,10 @@ export class Renderer {
     if (camera.zoom >= LOD.signals) this.drawSignals(input.network, grade, view);
     this.lap('signals');
 
+    // Set here rather than left over from `drawStatic`, which does not run on the
+    // visible canvas at all when the layer is blitted from the cache — so a tunnel's
+    // traffic was drawn at full strength on exactly the frames the cache was working.
+    ctx.globalAlpha = depthAlpha(this.theme.tunnelAlpha, grade);
     this.drawVehicles(input, grade, view);
     ctx.globalAlpha = 1;
     this.lap('vehicles');
@@ -283,7 +302,7 @@ export class Renderer {
 
     const tunnel = grade < 0;
     const bridge = grade > 0;
-    ctx.globalAlpha = tunnel ? theme.tunnelAlpha : 1;
+    ctx.globalAlpha = depthAlpha(theme.tunnelAlpha, grade);
 
     // A raised road throws a shadow, so the stacking order reads at a glance. The
     // shape is baked from the road's own height rather than translated wholesale,
@@ -300,7 +319,7 @@ export class Renderer {
       for (const tile of tiles) ctx.fill(tile.shadowFar);
       ctx.globalAlpha = 0.5;
       for (const tile of tiles) ctx.fill(tile.shadow);
-      ctx.globalAlpha = tunnel ? theme.tunnelAlpha : 1;
+      ctx.globalAlpha = depthAlpha(theme.tunnelAlpha, grade);
     }
     this.lap('shadow');
 
@@ -322,6 +341,17 @@ export class Renderer {
         // ground falls, and a stroke of even width cannot say it at all.
         ctx.fillStyle = theme.embankmentHachure;
         for (const tile of tiles) ctx.fill(tile.slope);
+      }
+      // And above the reach of made ground, the legs the deck stands on. They fall
+      // the way the shadows do and lengthen as the deck rises, so a viaduct climbing
+      // from one level to the next shows it — which an embankment cannot, because
+      // there is no ground up there for one to be made of.
+      if (camera.zoom >= LOD.trees) {
+        ctx.strokeStyle = theme.bridgePier;
+        ctx.lineWidth = lineWidth(WIDTHS.pier * 2, camera.zoom);
+        ctx.lineCap = 'butt';
+        for (const tile of tiles) ctx.stroke(tile.piers);
+        ctx.lineCap = 'round';
       }
       ctx.globalAlpha = was;
     }
