@@ -1198,6 +1198,15 @@ markings → signals) → vehicles (per grade) → editor overlays.
     that is already struggling.
   - **Nothing is cached while the picture is still being made.** Decoration changes it every frame,
     so a copy would be stale before it was blitted.
+  - **A zoom that is still moving stretches the copy instead of redrawing it.** A redraw is the only
+    way to be right at a new zoom, and it is 200 ms — once per notch of the wheel, which is a gesture
+    at four frames a second. So while the zoom is *changing* the cached bitmap is scaled to fit, and
+    the first frame after it settles takes the redraw and comes out sharp. Soft for the length of the
+    gesture is what every map does. Refused past 2.5x, where it stops being soft and becomes a smear,
+    and refused when the cached area no longer reaches the edges — which is what zooming out does.
+    Only the part that lands on screen is sampled: handing the whole bitmap over and letting the
+    canvas clip it resamples 1.96 viewports to show one, and measured 18 ms a frame. Zoom gesture on
+    the same import: **251 ms a frame to 16**.
   - Signals, vehicles, overlays, diagnostics and the grid are drawn live on top, every frame.
 - Tunnels (grade < 0): dashed casing, fill and vehicles at ~40% alpha. Bridges (grade > 0): a
   **parapet** — lighter than the casing and wider — plus a two-layer drop shadow.
@@ -1729,7 +1738,7 @@ Roundabouts are the obvious next feature. None of it before merges are flawless.
 
 ## Testing strategy
 
-`npm test` runs 768 tests in about 140 s; the merge suite is most of that and is worth every
+`npm test` runs 771 tests in about 140 s; the merge suite is most of that and is worth every
 second. Two of them are red, both in `test/sim/committed-crossing.test.ts`, and they are the
 at-grade priority crossing under **Milestones** — not a flake and not something to re-run away.
 

@@ -42,6 +42,9 @@ const MARGIN = 1.4;
  */
 const MAX_PIXELS = 14e6;
 
+/** How far a cached bitmap may be stretched before it stops being worth looking at. */
+const MAX_SCALE = 2.5;
+
 /** A rectangle of the offscreen, in its own device pixels. */
 interface PixelRect { x: number; y: number; w: number; h: number }
 
@@ -71,6 +74,41 @@ export class StaticLayer {
     if (!this.covers(dx, dy, camera)) return false;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.drawImage(this.front, dx, dy);
+    return true;
+  }
+
+  /**
+   * Blits the cached bitmap *scaled*, for a zoom that has changed since it was made.
+   *
+   * A redraw is the only way to get the picture right at a new zoom, and on a big
+   * map it is two hundred milliseconds — once per notch of the wheel, which is a
+   * gesture at five frames a second. Scaling what is already there is what every map
+   * does instead: soft for as long as the wheel is turning, sharp the moment it
+   * stops, because the frame after a zoom settles takes the redraw.
+   *
+   * Refused past `MAX_SCALE`, where it stops being a soft picture and becomes a
+   * smear, and refused whenever the cached area no longer reaches the edges — which
+   * is what zooming out far enough does.
+   */
+  blitScaled(ctx: CanvasRenderingContext2D, camera: Camera, grade: number): boolean {
+    if (!this.valid || !this.front || this.grade !== grade) return false;
+    if (typeof ctx.drawImage !== 'function') return false;
+    if (this.at.devicePixelRatio !== camera.devicePixelRatio) return false;
+    const scale = camera.zoom / this.at.zoom;
+    if (!(scale > 1 / MAX_SCALE && scale < MAX_SCALE)) return false;
+
+    const dx = camera.originX() - this.at.originX() * scale;
+    const dy = camera.originY() - this.at.originY() * scale;
+    const dw = this.front.width * scale;
+    const dh = this.front.height * scale;
+    const w = camera.width * camera.devicePixelRatio;
+    const h = camera.height * camera.devicePixelRatio;
+    if (dx > 0 || dy > 0 || dx + dw < w || dy + dh < h) return false;
+    // Only the part that lands on screen. Handing over the whole bitmap and letting
+    // the canvas clip means resampling 1.96 viewports to show one, which measured
+    // 18 ms a frame — most of the budget, spent on pixels nobody sees.
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(this.front, -dx / scale, -dy / scale, w / scale, h / scale, 0, 0, w, h);
     return true;
   }
 

@@ -25,6 +25,8 @@ const canvas = document.getElementById('c') as HTMLCanvasElement;
 const ZOOMS = (params.get('zooms') ?? '0.08,0.16,0.3,0.45,0.9,2')
   .split(',').map(Number).filter((z) => z > 0);
 const PAN = params.get('pan') === '1';
+/** Change the zoom a little each frame, which is what a wheel gesture does. */
+const ZOOMING = params.get('zooming') === '1';
 const FRAMES = Number(params.get('frames') ?? 45);
 /** Viewports of pan per second. One is a normal drag; ten forces a redraw a frame. */
 const SPEED = Number(params.get('speed') ?? 0.33);
@@ -98,6 +100,7 @@ async function main(): Promise<void> {
       if (PAN) {
         renderer.camera.x = home.x + (i * canvas.clientWidth * SPEED / 60) / zoom;
       }
+      if (ZOOMING) renderer.camera.zoom = zoom * Math.pow(1.02, i);
       const start = performance.now();
       renderer.render(input);
       samples.push(performance.now() - start);

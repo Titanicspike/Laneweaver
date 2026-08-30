@@ -103,6 +103,42 @@ describe('the static layer', () => {
     expect(rec.calls[1].only, 'a rescale is not a scroll').toBeNull();
   });
 
+  it('stretches what it has while the zoom is moving', () => {
+    // A redraw is the only way to be right at a new zoom, and on a big map that is
+    // two hundred milliseconds — once per notch of the wheel. Stretching is what
+    // every map does instead: soft while the wheel turns, sharp when it stops.
+    const layer = new StaticLayer();
+    const ctx = context();
+    const rec = recorder();
+    layer.capture(ctx as never, camera(), 0, rec.draw);
+    const zoomed = camera();
+    zoomed.zoom = 1.3;
+    expect(layer.blit(ctx as never, zoomed, 0), 'not as an exact copy').toBe(false);
+    expect(layer.blitScaled(ctx as never, zoomed, 0)).toBe(true);
+    expect(rec.calls.length, 'and without drawing anything').toBe(1);
+  });
+
+  it('refuses to stretch past the point of being worth looking at', () => {
+    const layer = new StaticLayer();
+    const ctx = context();
+    const rec = recorder();
+    layer.capture(ctx as never, camera(), 0, rec.draw);
+    const far = camera();
+    far.zoom = 8;
+    expect(layer.blitScaled(ctx as never, far, 0)).toBe(false);
+  });
+
+  it('refuses to stretch where the copy no longer reaches the edges', () => {
+    // Zooming *out* shows more world than the bitmap holds, however it is scaled.
+    const layer = new StaticLayer();
+    const ctx = context();
+    const rec = recorder();
+    layer.capture(ctx as never, camera(), 0, rec.draw);
+    const out = camera();
+    out.zoom = 0.5;
+    expect(layer.blitScaled(ctx as never, out, 0)).toBe(false);
+  });
+
   it('never serves one grade from another grade copy', () => {
     const layer = new StaticLayer();
     const ctx = context();

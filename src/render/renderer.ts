@@ -78,6 +78,11 @@ export class Renderer {
 
   private lastPathsVersion = -1;
 
+  private lastZoom = 0;
+
+  /** Whether the zoom moved since the last frame: a gesture rather than a state. */
+  private zooming = false;
+
   private lap(key: string): void {
     const now = performance.now();
     this.timings[key] = (this.timings[key] ?? 0) + (now - this.mark);
@@ -156,6 +161,9 @@ export class Renderer {
     // One grade is cached, and it is the one carrying the picture: a stack has to
     // interleave with its traffic, so caching all of them would either draw cars
     // through flyovers or cost an offscreen canvas per level.
+    this.zooming = camera.zoom !== this.lastZoom;
+    this.lastZoom = camera.zoom;
+
     this.cachedGrade = Number.NaN;
     // Nothing to cache while the picture is still being made: decoration changes it
     // every frame, so a copy would be stale before it was blitted and the capture
@@ -203,6 +211,12 @@ export class Renderer {
     if (cache && cache.blit(ctx, camera, grade)) {
       painted = true;
       this.stats.blits++;
+    } else if (cache && this.zooming && cache.blitScaled(ctx, camera, grade)) {
+      // Mid-gesture: stretch what we have rather than spend two hundred milliseconds
+      // on a picture that is about to be the wrong size again. The frame after the
+      // wheel stops is not `zooming`, so it takes the redraw and it comes out sharp.
+      painted = true;
+      this.stats.blits++;
     } else if (cache) {
       painted = cache.capture(ctx, camera, grade,
         (target, cam, only) => this.drawStatic(target, cam, input, grade, only));
@@ -210,6 +224,9 @@ export class Renderer {
     }
     if (!painted) this.drawStatic(ctx, camera, input, grade, null);
     camera.applyTo(ctx);
+    // Attributed on its own: on a blit frame nothing else in the stack runs, and
+    // without this the copy's cost lands on whichever pass happens to be timed next.
+    this.lap('blit');
 
     if (camera.zoom >= LOD.signals) this.drawSignals(input.network, grade, view);
     this.lap('signals');
